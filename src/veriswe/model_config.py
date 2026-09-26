@@ -18,26 +18,6 @@ from veriswe import config_dir
 
 logger = logging.getLogger("veriswe.model")
 
-KNOWN_PREFIXES = (
-    "anthropic/",
-    "openai/",
-    "gemini/",
-    "vertex_ai/",
-    "openrouter/",
-    "groq/",
-    "xai/",
-    "mistral/",
-    "deepseek/",
-    "together_ai/",
-    "azure/",
-    "bedrock/",
-    "ollama/",
-    "ollama_chat/",
-    "hosted_vllm/",
-    "fireworks_ai/",
-    "cerebras/",
-)
-
 # provider -> litellm prefix
 LITELLM_PREFIX = {
     "anthropic": "anthropic",
@@ -189,15 +169,17 @@ def resolve_model(
     model_name = (cli_model or env.get("AI_MODEL") or cfg.get("model_name") or "").strip()
 
     if provider == "auto":
-        # An explicit prefix in the model name wins over key sniffing.
-        prefix = model_name.split("/", 1)[0] if "/" in model_name else ""
+        key_provider = detect_provider(api_key)
+        model_prefix = model_name.split("/", 1)[0] if "/" in model_name else ""
         inv = {v: k for k, v in LITELLM_PREFIX.items()}
-        if prefix in inv and not base_url:
-            provider = inv[prefix]
-        elif base_url:
+        if base_url:
             provider = "openai"  # generic OpenAI-compatible endpoint
+        elif key_provider != "openai":
+            provider = key_provider  # a distinctive key (sk-ant-, AIza, gsk_, ...) decides where requests go
+        elif model_prefix in inv:
+            provider = inv[model_prefix]  # generic key: trust an explicit provider prefix in the model name
         else:
-            provider = detect_provider(api_key)
+            provider = "openai"
 
     if not model_name and base_url:
         model_name = _first_model_from_endpoint(base_url, api_key)
@@ -208,14 +190,10 @@ def resolve_model(
     if not model_name:
         raise ModelConfigError("No model configured. Set AI_MODEL or model_name in config/model.yaml")
 
-    prefix = LITELLM_PREFIX.get(provider, "openai")
-    if base_url:
-        # Custom endpoint: keep the served model id verbatim after the provider prefix.
-        full_name = model_name if model_name.startswith(f"{prefix}/") else f"{prefix}/{model_name}"
-    elif model_name.startswith(KNOWN_PREFIXES):
-        full_name = model_name
-    else:
-        full_name = f"{prefix}/{model_name}"
+    # litellm routes on the leading "<provider>/" segment. Model ids may themselves contain slashes
+    # (groq: openai/gpt-oss-120b, openrouter: anthropic/claude-...), so always add the route prefix.
+    prefix = LITELLM_PREFIX.get(provider, provider)
+    full_name = model_name if model_name.startswith(f"{prefix}/") else f"{prefix}/{model_name}"
 
     model_kwargs: dict[str, Any] = {"drop_params": True, **(cfg.get("model_kwargs") or {})}
     model_kwargs["api_key"] = api_key

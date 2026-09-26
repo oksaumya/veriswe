@@ -234,3 +234,22 @@ def test_refuses_to_work_on_the_harness_itself():
 
     with pytest.raises(ValueError, match="harness itself"):
         resolve_repo(str(repo_root), Issue(title="", body="x"), repo_root / "workspace")
+
+
+@pytest.mark.parametrize(
+    ("key", "model", "expected"),
+    [
+        ("gsk_abc", "", "groq/openai/gpt-oss-120b"),  # provider default whose id contains a slash
+        ("gsk_abc", "openai/gpt-oss-120b", "groq/openai/gpt-oss-120b"),  # distinctive key wins over model prefix
+        ("sk-or-v1-abc", "anthropic/claude-sonnet-5", "openrouter/anthropic/claude-sonnet-5"),
+        ("sk-ant-abc", "claude-opus-5-5", "anthropic/claude-opus-5-5"),
+        ("AIzaXYZ", "gemini/gemini-2.5-pro", "gemini/gemini-2.5-pro"),
+        ("sk-proj-abc", "gpt-5", "openai/gpt-5"),
+        ("sk-generic", "deepseek/deepseek-chat", "deepseek/deepseek-chat"),
+    ],
+)
+def test_model_routing(tmp_path, key, model, expected):
+    from veriswe import config_dir
+
+    env = {"AI_API_KEY": key, **({"AI_MODEL": model} if model else {})}
+    assert resolve_model(env=env, yaml_path=config_dir / "model.yaml").model_name == expected

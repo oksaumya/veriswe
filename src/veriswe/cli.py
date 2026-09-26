@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 import typer
@@ -127,6 +128,9 @@ def main(
         result = run_task(issue, repo, model_override=model, on_event=HeadlessPrinter(verbose=not quiet), agent_overrides=overrides)
     except ModelConfigError as e:
         console.print(f"[bold red]Model configuration error:[/] {e}")
+        raise typer.Exit(2)
+    except (ValueError, FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as e:
+        console.print(f"[bold red]Input error:[/] {e}")
         raise typer.Exit(2)
     console.print(Panel(Markdown(result.report_path.read_text().split("## Patch")[0]), title="Result", border_style="green" if result.verified else "yellow"))
     console.print(f"Patch: [bold]{result.run_dir / 'patch.diff'}[/]   Report: [bold]{result.report_path}[/]")
