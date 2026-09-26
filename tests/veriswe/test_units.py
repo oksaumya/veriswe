@@ -195,7 +195,8 @@ def test_pick_best_model():
     from veriswe.model_config import pick_best_model
 
     groq = ["allam-2-7b", "whisper-large-v3", "meta-llama/llama-prompt-guard-2-22m", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-    assert pick_best_model(groq) == "openai/gpt-oss-120b"
+    assert pick_best_model(groq) == "qwen/qwen3.8-27b"  # the prescribed DeepSeek/Qwen family wins
+    assert pick_best_model([m for m in groq if "qwen" not in m]) == "openai/gpt-oss-120b"
     assert pick_best_model(["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5-5"]) == "claude-opus-5-5"
     assert pick_best_model(["gpt-5-nano", "gpt-5-mini", "gpt-5", "text-embedding-3-large"]) == "gpt-5"
 
@@ -273,3 +274,69 @@ def test_tools_ignore_a_broken_system_python(tmp_path, monkeypatch):
     out = env.execute({"command": "view m.py && str_replace m.py --old 'x = 1' --new 'x = 2'"})
     assert out["returncode"] == 0, out["output"]
     assert (repo / "m.py").read_text() == "x = 2\n"
+
+
+class _FakeResp:
+    def __init__(self, status, ids=()):
+        self.status_code = status
+        self._ids = ids
+
+    def json(self):
+        return {"data": [{"id": i} for i in self._ids]}
+
+
+def _fake_hosts(monkeypatch, accepting: dict[str, list[str]]):
+    """Pretend only the hosts in `accepting` (substring of base URL -> model ids) accept the key."""
+    import requests
+
+    def get(url, **kw):
+        for host, ids in accepting.items():
+            if host in url:
+                return _FakeResp(200, ids)
+        return _FakeResp(401)
+
+    monkeypatch.setattr(requests, "get", get)
+
+
+def test_discovery_finds_deepseek(monkeypatch):
+    import veriswe.model_config as mc
+
+    real = mc._real_discover_endpoint
+    monkeypatch.setattr(mc, "discover_endpoint", real)  # undo the offline stub for this test
+    _fake_hosts(monkeypatch, {"api.deepseek.com": ["deepseek-v4-pro", "deepseek-flash"]})
+    ep = real("sk-0123456789abcdef")
+    assert ep.provider == "deepseek" and ep.base_url.startswith("https://api.deepseek.com")
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-0123456789abcdef"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.model_name == "deepseek/deepseek-flash"
+    assert r.model_kwargs["api_base"].startswith("https://api.deepseek.com")
+    assert r.model_kwargs["reasoning_effort"] == "high"
+
+
+def test_discovery_finds_qwen_on_dashscope_and_prefers_coder(monkeypatch):
+    import veriswe.model_config as mc
+
+    monkeypatch.setattr(mc, "discover_endpoint", mc._real_discover_endpoint)
+    _fake_hosts(monkeypatch, {"dashscope-intl": ["qwen-plus", "qwen3-max", "qwen3-coder-plus", "qwen3-coder-flash", "text-embedding-v4"]})
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-abc"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.provider == "dashscope"
+    assert r.model_name == "dashscope/qwen3-coder-plus"
+    assert "dashscope-intl" in r.model_kwargs["api_base"]
+
+
+def test_discovery_priority_and_explicit_model(monkeypatch):
+    import veriswe.model_config as mc
+
+    monkeypatch.setattr(mc, "discover_endpoint", mc._real_discover_endpoint)
+    # Key accepted by both SiliconFlow and OpenAI -> SiliconFlow wins (DeepSeek/Qwen hosts first)
+    _fake_hosts(monkeypatch, {"siliconflow.com": ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-Coder-480B-A35B-Instruct"], "api.openai.com": ["gpt-5"]})
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-abc", "AI_MODEL": "deepseek-ai/DeepSeek-V3"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.model_name == "openai/deepseek-ai/DeepSeek-V3" and "siliconflow.com" in r.model_kwargs["api_base"]
+
+
+def test_no_host_accepts_key_falls_back_to_openai(monkeypatch):
+    import veriswe.model_config as mc
+
+    monkeypatch.setattr(mc, "discover_endpoint", mc._real_discover_endpoint)
+    _fake_hosts(monkeypatch, {})
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-abc"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.provider == "openai"

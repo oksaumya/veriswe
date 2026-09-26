@@ -165,8 +165,10 @@ class VeriAgent(DefaultAgent):
         self.tokens["prompt"] += int(usage.get("prompt_tokens") or 0)
         self.tokens["completion"] += int(usage.get("completion_tokens") or 0)
         details = usage.get("prompt_tokens_details") or {}
-        cached = (details.get("cached_tokens") if isinstance(details, dict) else 0) or usage.get(
-            "cache_read_input_tokens"
+        cached = (
+            (details.get("cached_tokens") if isinstance(details, dict) else 0)
+            or usage.get("prompt_cache_hit_tokens")  # DeepSeek
+            or usage.get("cache_read_input_tokens")  # Anthropic
         )
         self.tokens["cached"] += int(cached or 0)
 

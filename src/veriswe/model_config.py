@@ -29,6 +29,14 @@ LITELLM_PREFIX = {
     "mistral": "mistral",
     "deepseek": "deepseek",
     "together": "together_ai",
+    "dashscope": "dashscope",
+    "dashscope_coding": "openai",
+    "siliconflow": "openai",
+    "fireworks": "fireworks_ai",
+    "deepinfra": "deepinfra",
+    "novita": "novita",
+    "nvidia": "nvidia_nim",
+    "huggingface": "openai",
 }
 
 
@@ -65,7 +73,78 @@ def detect_provider(api_key: str) -> str:
         return "groq"
     if k.startswith("xai-"):
         return "xai"
-    return "openai"
+    if k.startswith("sk-sp-"):
+        return "dashscope_coding"  # Alibaba Model Studio "Coding Plan" key
+    if k.startswith("sk-ws"):
+        return "dashscope"  # Alibaba Model Studio workspace key (region is probed)
+    if k.startswith("sk_"):
+        return "novita"
+    if k.startswith("nvapi-"):
+        return "nvidia"
+    if k.startswith("hf_"):
+        return "huggingface"
+    if k.startswith("fw_"):
+        return "fireworks"
+    return "openai"  # generic "sk-..." keys (OpenAI, DeepSeek, Qwen/DashScope, SiliconFlow, ...): see discover_endpoint
+
+
+# Where a generic key may belong, in priority order. DeepSeek + Qwen hosts first (the prescribed model families).
+# Each entry: (provider, OpenAI-compatible base URL). Probed with the free `GET /models` call.
+ENDPOINT_CANDIDATES = [
+    ("deepseek", "https://api.deepseek.com"),
+    ("dashscope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+    ("dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    ("dashscope", "https://dashscope-us.aliyuncs.com/compatible-mode/v1"),
+    ("dashscope", "https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1"),
+    ("siliconflow", "https://api.siliconflow.com/v1"),
+    ("siliconflow", "https://api.siliconflow.cn/v1"),
+    ("openai", "https://api.openai.com/v1"),
+    ("together", "https://api.together.ai/v1"),
+    ("fireworks", "https://api.fireworks.ai/inference/v1"),
+    ("deepinfra", "https://api.deepinfra.com/v1/openai"),
+]
+# NOTE: only hosts whose `GET /models` returns 401 for an invalid key belong above (verified 2026-09-26).
+# Novita, OpenRouter, NVIDIA and the HF router answer /models without auth, so they would give false positives;
+# they are recognised by their distinctive key prefixes instead.
+FIXED_BASE_URLS = {  # providers whose endpoint we always pass explicitly (never rely on library defaults)
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "huggingface": "https://router.huggingface.co/v1",
+    "novita": "https://api.novita.ai/openai",
+    "dashscope_coding": "https://coding-intl.dashscope.aliyuncs.com/v1",
+}
+
+
+@dataclass
+class Endpoint:
+    provider: str
+    base_url: str
+    models: list[str]
+
+
+def discover_endpoint(api_key: str, candidates: list[tuple[str, str]] | None = None, timeout: float = 10) -> Endpoint | None:
+    """Find which OpenAI-compatible host accepts this key (probes `GET /models` on all candidates in parallel).
+
+    Returns the highest-priority candidate that answers 200 with a model list, or None.
+    """
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    candidates = candidates or ENDPOINT_CANDIDATES
+
+    def probe(c):
+        provider, url = c
+        try:
+            r = requests.get(url.rstrip("/") + "/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout)
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                return Endpoint(provider, url, [m["id"] for m in data if isinstance(m, dict) and "id" in m])
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        results = list(pool.map(probe, candidates))
+    return next((r for r in results if r is not None), None)
 
 
 def load_model_yaml(path: Path | None = None) -> dict:
@@ -102,9 +181,13 @@ NON_CHAT = re.compile(
     r"whisper|tts|embed|guard|moderation|image|dall-e|audio|realtime|transcri|search|orpheus|allam|babbage|davinci|rerank|ocr|vision-only|sora|veo|imagen"
 )
 PREFERENCE = [
-    "claude-opus", "claude-sonnet", "gpt-5", "gemini-3", "gemini-2.5-pro", "qwen3-coder", "gpt-oss-120b",
-    "kimi-k2", "deepseek", "glm-4", "grok-4", "devstral", "codestral", "llama-4", "qwen3", "70b", "gpt-4.1",
-    "gpt-4o", "claude", "gemini", "gpt-oss", "llama", "mistral",
+    # DeepSeek + Qwen first: the model families prescribed for the official evaluation (checked 2026-09-26).
+    "deepseek-flash", "deepseek-v4.1", "deepseek-v4-pro", "deepseek-v4",
+    "qwen3.8-max", "qwen3.7-max", "qwen3-coder-plus", "qwen3-coder-next", "qwen3-coder-480b", "qwen3.8-plus",
+    "qwen3.7-plus", "qwen3-max", "qwen3-coder", "qwen3.8", "qwen3.7", "deepseek-v3", "deepseek",
+    "claude-opus", "claude-sonnet", "gpt-5", "gemini-3", "gemini-2.5-pro", "gpt-oss-120b",
+    "kimi-k2", "glm-4", "grok-4", "devstral", "codestral", "llama-4", "qwen3", "70b", "gpt-4.1",
+    "gpt-4o", "claude", "gemini", "gpt-oss", "llama", "mistral", "qwen",
 ]  # fmt: skip
 SMALL = re.compile(r"mini|nano|lite|flash-8b|small|haiku|[^0-9](1|3|7|8|9|20)b\b")
 
@@ -154,7 +237,11 @@ def _first_model_from_endpoint(base_url: str, api_key: str) -> str:
 
 
 def resolve_model(
-    cli_model: str | None = None, *, yaml_path: Path | None = None, env: dict[str, str] | None = None
+    cli_model: str | None = None,
+    *,
+    yaml_path: Path | None = None,
+    env: dict[str, str] | None = None,
+    discover: bool = True,
 ) -> ResolvedModel:
     env = dict(os.environ if env is None else env)
     cfg = load_model_yaml(yaml_path)
@@ -174,15 +261,29 @@ def resolve_model(
         inv = {v: k for k, v in LITELLM_PREFIX.items()}
         if base_url:
             provider = "openai"  # generic OpenAI-compatible endpoint
+        elif key_provider == "dashscope" and discover and (
+            ep := discover_endpoint(api_key, [c for c in ENDPOINT_CANDIDATES if c[0] == "dashscope"])
+        ):
+            provider, base_url = ep.provider, ep.base_url  # workspace key: find its region
+            model_name = model_name or pick_best_model(ep.models)
         elif key_provider != "openai":
             provider = key_provider  # a distinctive key (sk-ant-, AIza, gsk_, ...) decides where requests go
+            base_url = FIXED_BASE_URLS.get(provider, "")
         elif model_prefix in inv:
             provider = inv[model_prefix]  # generic key: trust an explicit provider prefix in the model name
+        elif discover and (ep := discover_endpoint(api_key)):
+            # Generic "sk-..." key: DeepSeek, Qwen (DashScope), SiliconFlow and OpenAI keys all look alike.
+            provider, base_url = ep.provider, ep.base_url
+            if not model_name:
+                model_name = pick_best_model(ep.models)
+            elif ep.models and model_name not in ep.models:
+                # e.g. AI_MODEL=qwen3-coder-plus given without a host: keep it, the probe reports if it's wrong
+                logger.warning(f"{model_name} is not listed at {ep.base_url}")
         else:
             provider = "openai"
 
     if not model_name and base_url:
-        model_name = _first_model_from_endpoint(base_url, api_key)
+        model_name = pick_best_model(_list_models(base_url, api_key)) or _first_model_from_endpoint(base_url, api_key)
     from_default = False
     if not model_name:
         model_name = (cfg.get("provider_defaults") or {}).get(provider, "")
@@ -196,6 +297,9 @@ def resolve_model(
     full_name = model_name if model_name.startswith(f"{prefix}/") else f"{prefix}/{model_name}"
 
     model_kwargs: dict[str, Any] = {"drop_params": True, **(cfg.get("model_kwargs") or {})}
+    for override in cfg.get("model_overrides") or []:
+        if re.search(override.get("match", "(?!)"), full_name, re.I):
+            model_kwargs.update(override.get("model_kwargs") or {})
     model_kwargs["api_key"] = api_key
     if base_url:
         model_kwargs["api_base"] = base_url
@@ -220,6 +324,7 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
 
     from minisweagent.models.utils.actions_toolcall import BASH_TOOL
     from veriswe import quiet_litellm
+    from veriswe.models import adaptive_completion, extract_leaked_command
 
     quiet_litellm()
 
@@ -229,7 +334,7 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
         {"role": "user", "content": "Call the bash tool with the command: echo ok"},
     ]
     try:
-        resp = litellm.completion(model=resolved.model_name, messages=messages, tools=[BASH_TOOL], **kwargs)
+        resp = adaptive_completion(resolved.model_name, messages, kwargs, tools=[BASH_TOOL])
     except litellm.exceptions.NotFoundError as e:
         api_key = resolved.model_kwargs.get("api_key", "")
         if resolved.from_default and (best := pick_best_model(list_provider_models(resolved.provider, api_key, resolved.base_url))):
@@ -248,12 +353,13 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
     except Exception as e:
         # Tools probably unsupported; check the model answers at all without tools.
         try:
-            litellm.completion(
-                model=resolved.model_name, messages=[{"role": "user", "content": "Reply with: ok"}], **kwargs
-            )
+            adaptive_completion(resolved.model_name, [{"role": "user", "content": "Reply with: ok"}], kwargs)
         except Exception as e2:
             raise ModelConfigError(f"Model probe failed for {resolved.display}: {e2}") from e2
         return "text", f"tool calling failed ({type(e).__name__}); using text actions"
+    resolved.model_kwargs = kwargs  # keep any learned provider adaptations (e.g. Qwen enable_thinking)
     if resp.choices and resp.choices[0].message.tool_calls:
         return "toolcall", "native tool calling works"
+    if resp.choices and extract_leaked_command(resp.choices[0].message.content or ""):
+        return "toolcall", "tool calls arrive inside the text; parsing them from content"
     return "text", "model did not emit a tool call; using text actions"

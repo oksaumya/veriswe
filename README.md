@@ -56,22 +56,47 @@ The model is declared in [`config/model.yaml`](config/model.yaml). The credentia
 
 | Setting | Config key | Env override |
 |---|---|---|
-| Model (the one the organisers prescribe) | `model_name` | `AI_MODEL` |
+| Model (empty = best available DeepSeek/Qwen model) | `model_name` | `AI_MODEL` |
 | Provider | `provider: auto` | `AI_PROVIDER` |
 | OpenAI-compatible endpoint (vLLM, Ollama, proxies) | `base_url` | `AI_BASE_URL` |
 | Action format | `action_mode: auto` | `AI_TEXT_MODE=1/0` |
 
-- **Provider auto-detection** from the key prefix:
-  - `sk-ant-` → Anthropic
-  - `AIza` → Gemini
-  - `sk-or-` → OpenRouter
-  - `gsk_` → Groq
-  - `xai-` → xAI
-  - anything else → OpenAI-compatible
+### DeepSeek and Qwen (official evaluation models)
 
-  An explicit `provider/model` prefix or `AI_BASE_URL` takes precedence over detection. When a `base_url` is set and no model is configured, VeriSWE uses the first model the endpoint lists.
-- **Capability probe.** One tiny call at startup checks the credential and native tool calling. Models without working tool calls fall back to plain-text actions (`mswea_bash_command` blocks), so weak or open models still work.
-- **Reproducibility.** Decoding uses `temperature: 0`, and parameters a model does not support are dropped automatically. The harness makes no other random choices.
+The organisers evaluate with **DeepSeek and Qwen** models. With only `AI_API_KEY` exported, VeriSWE works out the rest:
+
+1. **Finding the host.** DeepSeek, Alibaba (Qwen) and several hosts issue identical-looking `sk-...` keys. VeriSWE asks every candidate host's free `GET /models` endpoint at once whether it accepts the key. The candidates are DeepSeek, Alibaba DashScope (Singapore, Beijing, US and Hong Kong regions), SiliconFlow, OpenAI, Together, Fireworks and DeepInfra. Keys with a distinctive prefix map directly:
+
+   | Key prefix | Host |
+   |---|---|
+   | `sk-or-` | OpenRouter |
+   | `sk-ws` | Qwen workspace key (region probed) |
+   | `sk-sp-` | Qwen Coding Plan |
+   | `sk_` | Novita |
+   | `gsk_` | Groq |
+   | `nvapi-` | NVIDIA |
+   | `hf_` | Hugging Face |
+   | `sk-ant-` | Anthropic |
+   | `AIza` | Gemini |
+
+2. **Choosing the model.** VeriSWE picks the strongest DeepSeek/Qwen model the host offers. The current order is `deepseek-flash` (V4.1), then `deepseek-v4-pro`, then `qwen3.8-max`, then `qwen3-coder-plus`. The retired `deepseek-chat` and `deepseek-reasoner` names are not used. To pin an exact model, set `model_name` in `config/model.yaml` or `AI_MODEL`.
+3. **Handling provider rules:**
+   - **DeepSeek thinking mode** is enabled explicitly, so its `reasoning_content` is passed back on every turn. DeepSeek requires this in tool-calling conversations and otherwise returns HTTP 400 on the second turn.
+   - **Qwen `enable_thinking` errors** are learned from the first failure and fixed for the rest of the run. Open-weight Qwen3 models reject non-streaming calls while thinking is on.
+   - **Tool calls that some hosts leak into the text** are parsed: Qwen XML, Hermes `<tool_call>` JSON and DeepSeek DSML markup. Malformed arguments are also accepted where the intent is clear: code fences, `{"arguments": ...}` wrappers, and `shell` or `execute_bash` used as the tool name.
+   - **Timeout.** Requests use a 900s client timeout, because DeepSeek can queue a request for up to 10 minutes.
+4. **Caching.** DeepSeek and Qwen prompt-cache hits are counted and reported in `report.md`.
+
+The DeepSeek and Qwen behaviour is covered offline by full end-to-end runs against local fake servers that enforce these API rules (`tests/veriswe/test_provider_sim.py`).
+
+### Other providers and settings
+
+- **Capability probe.** One tiny call at startup checks the credential and native tool calling. Models without working tool calls fall back to plain-text actions (`mswea_bash_command` blocks), and a mid-run switch happens automatically if tool calls keep failing.
+- **Reproducibility.**
+  - The default is `temperature: 0`.
+  - Qwen models use Qwen's published agentic-coding sampling, `temperature: 0.7` and `top_p: 0.8`, because greedy decoding makes Qwen3 prone to repetition loops.
+  - DeepSeek ignores temperature in thinking mode.
+  - All values are fixed in `config/model.yaml` (`model_overrides`), and the harness makes no other random choices.
 
 ## Architecture
 
@@ -141,7 +166,7 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs 60 offline tests in under 30 seconds, with no network or API key:
+`make test` runs 84 offline tests in under 30 seconds, with no network or API key:
 
 - **Unit tests:** provider detection, config and env overrides, a no-secrets-in-config check, guards, the loop detector, masking, intake, and workspace diffs and their round trip.
 - **Tool tests:** `str_replace` uniqueness, lint revert and undo; `view`; `search`.
