@@ -137,6 +137,12 @@ def test_billing_errors_are_explained_not_misdiagnosed(monkeypatch):
     with pytest.raises(ModelConfigError, match="no usable credit"):
         probe_action_mode(r)
     assert mc.account_problem(Exception("rate limit reached")) is None
+    # a per-minute limit whose text mentions billing is NOT an account problem...
+    tpm = "Rate limit reached on output tokens per minute (OTPM): Limit 1000. Upgrade at https://console.groq.com/settings/billing"
+    assert mc.account_problem(Exception(tpm)) is None
+    # ...but an exhausted daily quota is reported as such
+    tpd = '{"error":{"message":"Rate limit reached ... on tokens per day (TPD): Limit 200000, Used 194225"}}'
+    assert "DAILY quota" in mc.account_problem(Exception(tpd))
 
 
 def test_discovery_returns_without_waiting_for_slow_hosts(monkeypatch):

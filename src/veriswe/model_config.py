@@ -337,19 +337,21 @@ ACCOUNT_ERROR_MARKERS = (
     "insufficient_quota",
     "exceeded your current quota",
     "payment required",
-    "billing",
     "arrearage",  # Alibaba Cloud: account overdue
     "account is not active",
 )
+DAILY_QUOTA_MARKERS = ("tokens per day", "(tpd)", "requests per day", "(rpd)", "daily limit", "daily quota")
 
 
 def account_problem(e: Exception) -> str | None:
-    """A human explanation if the error is about the account (credit, quota), not the request."""
+    """A human explanation if the error is about the account (credit or daily quota), not a transient limit."""
     text = str(e).lower()
-    if getattr(e, "status_code", None) == 402 or any(m in text for m in ACCOUNT_ERROR_MARKERS):
-        m = re.search(r'"message"\s*:\s*"([^"]+)"', str(e))
-        reason = (m.group(1) if m else str(e)[-160:]).strip()
-        return f"the API account behind AI_API_KEY has no usable credit/quota (provider says: {reason}). Top up the account or use another key."
+    m = re.search(r'"message"\s*:\s*"([^"]+)"', str(e))
+    reason = (m.group(1) if m else str(e)[-200:]).strip()
+    if getattr(e, "status_code", None) == 402 or any(k in text for k in ACCOUNT_ERROR_MARKERS):
+        return f"the API account behind AI_API_KEY has no usable credit (provider says: {reason}). Top up the account or use another key."
+    if any(k in text for k in DAILY_QUOTA_MARKERS):
+        return f"the API key's DAILY quota is used up (provider says: {reason}). Wait for the reset or use another key."
     return None
 
 

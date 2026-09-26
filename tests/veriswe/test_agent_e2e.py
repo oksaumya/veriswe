@@ -254,3 +254,23 @@ def test_check_repro_tool_matches_the_gate(calc_repo):
     assert "PASSES (bad: does not reproduce" in obs[5]  # weak reproduction detected
     assert "(data[mid - 1] + data[mid]) / 2" in res.patch  # the fix survived all the undo/redo
     assert res.verified
+
+
+def test_daily_quota_exhaustion_autosubmits_immediately(calc_repo):
+    import time
+
+    from veriswe.models import QuotaExhaustedError
+
+    model = script(REPRO, GOOD_FIX)
+    orig = model.query
+
+    def query(messages, **kw):
+        if model.current_index >= 1:
+            raise QuotaExhaustedError("tokens per day (TPD): Limit 200000, Used 199990")
+        return orig(messages, **kw)
+
+    model.query = query
+    t = time.time()
+    res, _ = run(calc_repo, model)
+    assert res.status.startswith("AutoSubmitted after ModelError (QuotaExhaustedError)") and res.verified
+    assert time.time() - t < 20

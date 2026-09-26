@@ -57,6 +57,16 @@ def retry_after_seconds(e: Exception) -> float | None:
 _LIMIT_REQ = re.compile(r"Limit\s*:?\s*(\d+).{0,40}?Requested\s*:?\s*(\d+)", re.I | re.S)
 
 
+class QuotaExhaustedError(Exception):
+    """The key's daily quota or credit is used up: retrying within this run cannot succeed."""
+
+
+def is_quota_exhausted(e: Exception) -> bool:
+    from veriswe.model_config import account_problem
+
+    return account_problem(e) is not None
+
+
 class RequestTooLargeError(Exception):
     """A single request exceeds the provider's per-minute token budget: retrying can never succeed."""
 
@@ -120,6 +130,8 @@ def adaptive_completion(model: str, messages: list[dict], kwargs: dict, *, max_w
         except TRANSIENT_ERRORS as e:
             if isinstance(e, litellm.exceptions.RateLimitError) and is_request_too_large(e):
                 raise RequestTooLargeError(str(e)[:500]) from e
+            if is_quota_exhausted(e):
+                raise
             if waits >= max_waits:
                 raise
             suggested = retry_after_seconds(e) if isinstance(e, litellm.exceptions.RateLimitError) else None
@@ -131,7 +143,7 @@ def adaptive_completion(model: str, messages: list[dict], kwargs: dict, *, max_w
 
 class _NoBlindRetryMixin:
     # A 400 will fail identically on retry; don't burn minutes of exponential backoff on it.
-    abort_exceptions = [*LitellmModel.abort_exceptions, litellm.exceptions.BadRequestError, RequestTooLargeError]
+    abort_exceptions = [*LitellmModel.abort_exceptions, litellm.exceptions.BadRequestError, RequestTooLargeError, QuotaExhaustedError]
     max_rate_limit_waits = 12
 
     def _query(self, messages, **kwargs):
@@ -149,6 +161,8 @@ class _NoBlindRetryMixin:
             except litellm.exceptions.RateLimitError as e:
                 if is_request_too_large(e):
                     raise RequestTooLargeError(str(e)[:500]) from e
+                if is_quota_exhausted(e):
+                    raise QuotaExhaustedError(str(e)[:600]) from e
                 wait = retry_after_seconds(e)
                 if wait is None or attempt == self.max_rate_limit_waits or wait > 300:
                     raise  # fall back to the generic tenacity retry
