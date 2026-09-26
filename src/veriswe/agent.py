@@ -169,6 +169,11 @@ class VeriAgent(DefaultAgent):
                 if self._overflow_level >= 3:
                     self._finish_on_limit("ContextOverflow")
                 self._overflow_level += 1
+                if type(e).__name__ == "RequestTooLargeError":
+                    # Providers may count the max OUTPUT tokens against the budget too: cap them as well.
+                    kw = getattr(getattr(self.model, "config", None), "model_kwargs", None)
+                    if isinstance(kw, dict):
+                        kw["max_tokens"] = min(kw.get("max_tokens") or 10**9, {1: 8192, 2: 4096}.get(self._overflow_level, 2048))
                 self.emit("compact", level=self._overflow_level, reason=type(e).__name__)
         chars_sent = _chars(sent)
         self.context["chars_before"] += chars_before

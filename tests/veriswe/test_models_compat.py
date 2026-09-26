@@ -229,3 +229,23 @@ def test_probe_is_not_fooled_by_one_flaky_tool_parse(monkeypatch):
     monkeypatch.setattr(litellm, "completion", completion)
     r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
     assert probe_action_mode(r)[0] == "toolcall"
+
+
+def test_probe_request_too_large_is_not_a_tool_problem(monkeypatch):
+    from veriswe.model_config import ResolvedModel, probe_action_mode
+
+    seen = []
+    ok = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[object()], content=""))])
+
+    def completion(**kw):
+        seen.append(kw.get("max_tokens"))
+        if kw.get("max_tokens") is None:
+            raise litellm.exceptions.RateLimitError(
+                message="Request too large on tokens per minute (TPM): Limit 6000, Requested 16900", model="m", llm_provider="groq"
+            )
+        return ok
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
+    assert probe_action_mode(r)[0] == "toolcall"
+    assert seen == [None, 512]

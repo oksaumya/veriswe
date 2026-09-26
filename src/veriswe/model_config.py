@@ -382,7 +382,13 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
 
     from minisweagent.models.utils.actions_toolcall import BASH_TOOL
     from veriswe import quiet_litellm
-    from veriswe.models import adaptive_completion, extract_leaked_command, is_tool_parse_error, salvage_failed_generation
+    from veriswe.models import (
+        RequestTooLargeError,
+        adaptive_completion,
+        extract_leaked_command,
+        is_tool_parse_error,
+        salvage_failed_generation,
+    )
 
     quiet_litellm()
 
@@ -396,6 +402,10 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
         for attempt in range(3):  # servers' tool-call parsers fail intermittently; don't judge on one fluke
             try:
                 resp = adaptive_completion(resolved.model_name, messages, kwargs, tools=[BASH_TOOL])
+                break
+            except RequestTooLargeError:
+                # Some providers count the max *output* tokens against a per-minute budget; the probe needs few.
+                resp = adaptive_completion(resolved.model_name, messages, {**kwargs, "max_tokens": 512}, tools=[BASH_TOOL])
                 break
             except litellm.exceptions.BadRequestError as e:
                 if not is_tool_parse_error(e):

@@ -394,3 +394,21 @@ def test_context_measurement_counts_truncation_and_masking():
     msgs = [{"role": "tool", "content": "head…tail", "extra": {"raw_output": "x" * 50_000}}]
     assert _chars(msgs) == len("head…tail")
     assert _chars(msgs, raw=True) == 50_000
+
+
+def test_cli_task_option_reaches_the_runner(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    import veriswe.runner as runner
+    from veriswe.cli import app
+
+    seen = {}
+
+    def fake_run_task(issue, repo, **kw):
+        seen.update(issue=issue, repo=repo)
+        raise ValueError("stop here")  # rendered as a clean input error
+
+    monkeypatch.setattr(runner, "run_task", fake_run_task)
+    res = CliRunner().invoke(app, ["--task", "Add a --json flag", "--repo", str(tmp_path), "--headless"])
+    assert seen == {"issue": "Add a --json flag", "repo": str(tmp_path)}
+    assert "Input error" in res.output and res.exit_code == 2

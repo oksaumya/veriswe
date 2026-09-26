@@ -2,7 +2,7 @@
 
 Each row names the requirement, where it is implemented, and the evidence that shows it working. Evidence is an automated test, a CI job, or a run artifact.
 
-`make test` runs 104 offline tests. `make test-all` runs 631 tests, including the whole upstream mini-swe-agent suite. CI runs both on every push.
+`make test` runs 106 offline tests. `make test-all` runs 633 tests, including the whole upstream mini-swe-agent suite. CI runs both on every push.
 
 ## 1. Problem statement: an autonomous coding-agent harness
 
