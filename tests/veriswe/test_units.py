@@ -365,3 +365,12 @@ def test_tolerates_common_env_mistakes():
     assert r.model_name == "openrouter/qwen/qwen3.8-27b:free"
     r = mc.resolve_model(env={"AI_API_KEY": "sk-x", "AI_MODEL": "m", "AI_BASE_URL": "https://h/api/v1/chat/completions"}, yaml_path=mc.config_dir / "model.yaml")
     assert r.model_kwargs["api_base"] == "https://h/api/v1"
+
+
+def test_refuses_folders_inside_the_harness_source(tmp_path):
+    from veriswe import repo_root
+    from veriswe.intake import Issue, resolve_repo
+
+    with pytest.raises(ValueError, match="part of the VeriSWE harness"):
+        resolve_repo(str(repo_root / "tests" / "veriswe" / "fixtures" / "calc"), Issue(title="", body="x"), repo_root / "workspace")
+    assert not (repo_root / "tests" / "veriswe" / "fixtures" / "calc" / ".git").exists()

@@ -171,7 +171,7 @@ def _list_models(base_url: str, api_key: str) -> list[str]:
         r.raise_for_status()
         return [m["id"] for m in r.json().get("data", []) if "id" in m]
     except Exception as e:  # pragma: no cover - network dependent
-        logger.warning(f"Could not list models from {base_url}: {e}")
+        logger.debug(f"Could not list models from {base_url}: {e}")
     return []
 
 
@@ -348,6 +348,14 @@ ACCOUNT_ERROR_MARKERS = (
 DAILY_QUOTA_MARKERS = ("tokens per day", "(tpd)", "requests per day", "(rpd)", "daily limit", "daily quota")
 
 
+INVALID_KEY_MARKERS = ("invalid api key", "invalid_api_key", "incorrect api key", "authentication fails", "unauthorized", "user not found", "invalid x-api-key", "api key not valid")
+
+
+def invalid_key(e: Exception) -> bool:
+    text = str(e).lower()
+    return getattr(e, "status_code", None) == 401 or any(k in text for k in INVALID_KEY_MARKERS)
+
+
 def account_problem(e: Exception) -> str | None:
     """A human explanation if the error is about the account (credit or daily quota), not a transient limit."""
     text = str(e).lower()
@@ -358,6 +366,14 @@ def account_problem(e: Exception) -> str | None:
     if any(k in text for k in DAILY_QUOTA_MARKERS):
         return f"the API key's DAILY quota is used up (provider says: {reason}). Wait for the reset or use another key."
     return None
+
+
+def _rejected_key_message(resolved: ResolvedModel) -> str:
+    msg = f"AI_API_KEY was rejected as invalid/expired by {resolved.display}."
+    if resolved.provider == "openai" and not resolved.base_url:
+        hosts = sorted({p for p, _ in ENDPOINT_CANDIDATES})
+        msg += f" No known host accepted it (probed: {', '.join(hosts)})."
+    return msg + " Check the key, or set AI_BASE_URL (and AI_MODEL) for a custom OpenAI-compatible endpoint."
 
 
 def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
@@ -391,10 +407,12 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
             hint = "\nModels available at this endpoint: " + ", ".join(ids[:40]) + "\nSet one with AI_MODEL=<id>."
         raise ModelConfigError(f"Model probe failed for {resolved.display}: {e}{hint}") from e
     except litellm.exceptions.AuthenticationError as e:
-        raise ModelConfigError(f"Model probe failed for {resolved.display}: {e}") from e
+        raise ModelConfigError(_rejected_key_message(resolved)) from e
     except Exception as e:
         if problem := account_problem(e):
             raise ModelConfigError(f"{resolved.display}: {problem}") from e
+        if invalid_key(e):
+            raise ModelConfigError(_rejected_key_message(resolved)) from e
         if isinstance(e, (litellm.exceptions.RateLimitError, litellm.exceptions.APIConnectionError, litellm.exceptions.Timeout)):
             raise ModelConfigError(f"{resolved.display}: the provider kept refusing requests after retries: {e}") from e
         # Tools probably unsupported; check the model answers at all without tools.

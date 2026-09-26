@@ -149,10 +149,11 @@ def resolve_repo(repo_spec: str | None, issue: Issue, workspace_root: Path) -> P
         p = Path(spec).expanduser().resolve()
         if not p.is_dir():
             raise FileNotFoundError(f"Repository path does not exist: {p}")
-        if p == HARNESS_ROOT.resolve():
+        root = HARNESS_ROOT.resolve()
+        if p == root or (p.is_relative_to(root) and not (p / ".git").exists() and not p.is_relative_to(root / "workspace")):
             raise ValueError(
-                f"{p} is the VeriSWE harness itself, not a target repository. "
-                "Pass REPO=<path-or-git-url> of the project to fix (or give a GitHub issue URL)."
+                f"{p} is part of the VeriSWE harness itself, not a separate repository. "
+                "Pass REPO=<path-or-git-url> of the project to fix (or copy it elsewhere first)."
             )
         return p
     url = spec or issue.repo_url
