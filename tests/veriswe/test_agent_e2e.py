@@ -63,7 +63,7 @@ def run(repo, model, **overrides):
 def test_happy_path_is_verified(calc_repo):
     model = script("search 'def median' calc", REPRO, "python reproduce_issue.py || true", GOOD_FIX, "python reproduce_issue.py", SUBMIT)
     res, events = run(calc_repo, model)
-    assert res.status == "Submitted (verified)", res.status
+    assert res.status == "VERIFIED", res.status
     assert res.verified
     assert "(data[mid - 1] + data[mid]) / 2" in res.patch
     assert "reproduce_issue.py" not in res.patch
@@ -94,22 +94,95 @@ def test_gate_rejects_empty_and_regressing_patches(calc_repo):
     verdicts = [e[1]["result"] for e in events if e[0] == "verify"]
     assert [v.passed for v in verdicts] == [False, False, True]
     assert any(c.name == "tests" and c.status == "fail" and "test_median_odd" in c.summary for c in verdicts[1].checks)
-    assert res.verified and res.status == "Submitted (verified)"
+    assert res.verified and res.status == "VERIFIED"
 
 
-def test_missing_repro_is_requested_once(calc_repo):
-    model = script(GOOD_FIX, SUBMIT, SUBMIT)
+def test_no_objective_evidence_is_never_verified(calc_repo):
+    """A correct-looking fix whose only support is 'existing tests still pass' is UNVERIFIED (audit 3.1)."""
+    model = script(GOOD_FIX, SUBMIT, SUBMIT, SUBMIT)
     res, events = run(calc_repo, model)
     verdicts = [e[1]["result"] for e in events if e[0] == "verify"]
-    assert not verdicts[0].passed and "reproduce_issue.py" in verdicts[0].feedback
-    assert verdicts[1].passed  # second time we accept on the strength of the tests
-    assert res.verified
+    assert [v.passed for v in verdicts] == [False, False, False]  # never relaxed in later rounds
+    assert "No objective evidence" in verdicts[0].feedback
+    assert res.status.startswith("UNVERIFIED") and not res.verified
+    assert "(data[mid - 1] + data[mid]) / 2" in res.patch  # patch preserved for inspection
+    assert "UNVERIFIED" in res.report_path.read_text()
+
+
+def test_new_test_that_fails_before_counts_as_evidence(calc_repo):
+    """Feature/test-fix flow: a new test that fails on the original code and passes now is objective evidence."""
+    add_test = """cat >> tests/test_stats.py <<'EOF'
+
+
+def test_median_even():
+    assert median([1, 2, 3, 4]) == 2.5
+EOF"""
+    model = script(add_test, GOOD_FIX, SUBMIT)
+    res, events = run(calc_repo, model)
+    final = [e[1]["result"] for e in events if e[0] == "verify"][-1]
+    ev = next(c for c in final.checks if c.name == "evidence")
+    assert res.verified and ev.status == "pass" and "test_median_even" in ev.summary
+
+
+def test_declared_refactor_is_verified_by_preserved_behaviour(calc_repo):
+    refactor = """str_replace calc/stats.py <<'EOF'
+<<<<<<< SEARCH
+    values = list(values)
+    if not values:
+=======
+    values = [v for v in values]
+    if len(values) == 0:
+>>>>>>> REPLACE
+EOF"""
+    model = DeterministicModel(outputs=[make_output("TASK TYPE: refactor", [{"command": refactor}], cost=0.0),
+                                        make_output("done", [{"command": SUBMIT}], cost=0.0)])  # fmt: skip
+    res, events = run(calc_repo, model)
+    assert res.verified, res.status
+    assert res.stats["telemetry"]["task_type"] == "refactor"
+
+
+def test_verifier_crash_is_not_a_submission(calc_repo, monkeypatch):
+    """Audit 3.2: a crashing verifier yields VERIFICATION ERROR feedback, never an accepted patch."""
+    from veriswe.verify import Verifier
+
+    calls = {"n": 0}
+    real = Verifier.verify
+
+    def flaky(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("disk on fire")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Verifier, "verify", flaky)
+    model = script(REPRO, GOOD_FIX, SUBMIT, SUBMIT)
+    res, events = run(calc_repo, model)
+    verdicts = [e[1]["result"] for e in events if e[0] == "verify"]
+    assert verdicts[0].passed is False and verdicts[0].checks[0].name == "verifier"
+    assert "VERIFICATION ERROR" in verdicts[0].feedback
+    assert verdicts[1].passed and res.verified  # accepted only after a real verification
+
+
+def test_telemetry_artifacts(calc_repo):
+    import json
+
+    model = script(REPRO, BAD_FIX, SUBMIT, UNDO, GOOD_FIX, SUBMIT)
+    res, _ = run(calc_repo, model)
+    summary = json.loads((res.run_dir / "telemetry_summary.json").read_text())
+    events = [json.loads(line) for line in (res.run_dir / "telemetry.jsonl").read_text().splitlines()]
+    assert summary["verified"] and summary["verification_rounds"] == 2 and summary["verification_failures"] == 1
+    assert summary["tool_calls"] == 6 and summary["model_calls"] == 6
+    assert summary["recovery_events"] >= 1  # the rejected round the agent recovered from
+    assert summary["context_chars_before"] >= summary["context_chars_sent"] > 0
+    kinds = {e["event"] for e in events}
+    assert {"issue", "model", "action", "observation", "verify", "done"} <= kinds
+    assert "AGENT EXECUTION" in res.report_path.read_text()
 
 
 def test_step_limit_autosubmits_best_patch(calc_repo):
     model = script(REPRO, GOOD_FIX, "ls", "ls", "ls")
     res, _ = run(calc_repo, model, step_limit=3)
-    assert res.status.startswith("AutoSubmitted after StepLimit")
+    assert res.status == "VERIFIED (best patch, stopped by StepLimit)", res.status
     assert "(data[mid - 1] + data[mid]) / 2" in res.patch
     assert res.verified
 
@@ -171,7 +244,7 @@ def test_model_crash_midrun_autosubmits(calc_repo):
 
     model.query = query
     res, _ = run(calc_repo, model)
-    assert res.status.startswith("AutoSubmitted after ModelError"), res.status
+    assert res.status.startswith("VERIFIED (best patch, stopped by ModelError"), res.status
     assert res.verified
 
 
@@ -272,5 +345,30 @@ def test_daily_quota_exhaustion_autosubmits_immediately(calc_repo):
     model.query = query
     t = time.time()
     res, _ = run(calc_repo, model)
-    assert res.status.startswith("AutoSubmitted after ModelError (QuotaExhaustedError)") and res.verified
+    assert res.status.startswith("VERIFIED (best patch, stopped by ModelError (QuotaExhaustedError)") and res.verified
     assert time.time() - t < 20
+
+
+def test_offline_recovery_demo(tmp_path):
+    """`make demo-recovery`: failure -> harness rejection -> recovery -> VERIFIED, with telemetry to show it."""
+    from veriswe import demo
+
+    repo = demo.prepare_repo(tmp_path / "ws")
+    res = run_task(demo.issue_spec(), str(repo), **demo.run_kwargs())
+    tel = res.stats["telemetry"]
+    assert res.verified and res.status == "VERIFIED"
+    assert tel["verification_rounds"] == 2 and tel["verification_failures"] == 1
+    assert tel["recovery_events"] >= 1 and tel["task_type"] == "bug"
+    assert "if len(data) % 2 == 0" in res.patch
+
+
+def test_context_reduction_is_measured_on_large_outputs(calc_repo):
+    from veriswe.runner import load_agent_yaml
+
+    big = "python3 -c \"print('x' * 30000)\""
+    model = script(big, big, REPRO, GOOD_FIX, SUBMIT)
+    model.config.observation_template = load_agent_yaml()["agent"]["observation_template"]  # the real (truncating) one
+    res, _ = run(calc_repo, model)
+    tel = res.stats["telemetry"]
+    assert tel["context_chars_reduced"] > 40_000  # head/tail truncation of 2 x 30K outputs, over later calls
+    assert tel["context_chars_sent"] < tel["context_chars_before"]

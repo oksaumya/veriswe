@@ -16,11 +16,33 @@ from veriswe.context import mask_observations, shrink_for_overflow
 from veriswe.environment import SECRET_ENV_VARS
 from veriswe.guards import LoopDetector, check_command
 from veriswe.models import toolcall_history_to_text
-from veriswe.verify import VerificationResult, Verifier, detect_python
+from veriswe.verify import Check, VerificationResult, Verifier, detect_python
 from veriswe.workspace import Workspace
 
 
 EDIT_COMMAND = re.compile(r"\b(str_replace|undo_edit|sed\s+-i|patch\b|git\s+apply|tee\b)|>\s*[\w./-]+\.\w+")
+
+
+TASK_TYPE_RE = re.compile(r"TASK[ _-]?TYPE\W{0,4}\s*(bug|regression|feature|test[ _-]?fix|test[ _-]?failure|refactor|other)", re.I)
+TASK_TYPES = {"bug": "bug", "regression": "bug", "feature": "feature", "test": "test-fix", "refactor": "refactor", "other": "other"}
+
+
+def _chars(messages: list[dict], *, raw: bool = False) -> int:
+    """Characters of the conversation. raw=True measures what a naive harness would send: full, untruncated
+    tool outputs and the complete history (the baseline for `context_chars_reduced`)."""
+    total = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            n = len(c)
+        elif isinstance(c, list):
+            n = sum(len(part.get("text", "")) for part in c if isinstance(part, dict))
+        else:
+            n = 0
+        if raw and isinstance(ro := (m.get("extra") or {}).get("raw_output"), str):
+            n = max(n, len(ro))
+        total += n + len(m.get("reasoning_content") or "")
+    return total
 
 
 class VeriAgentConfig(AgentConfig):
@@ -71,6 +93,8 @@ class VeriAgent(DefaultAgent):
         self.final: VerificationResult | None = None
         self.final_status = ""
         self.tokens = {"prompt": 0, "completion": 0, "cached": 0}
+        self.context = {"chars_before": 0, "chars_sent": 0, "chars_reduced": 0}
+        self.task_type = ""
         self._overflow_level = 0
         self.extra_template_vars |= {
             "repo": str(workspace.repo),
@@ -90,6 +114,7 @@ class VeriAgent(DefaultAgent):
         try:
             return super().step()
         except FormatError as e:
+            self.emit("format_error", detail=str((e.messages[0].get("content") or ""))[:200])
             if (e.messages[0].get("extra") or {}).get("tool_parse_failure"):
                 self.tool_parse_failures += 1
                 if self.tool_parse_failures >= 2 and self.config.action_mode == "toolcall" and self.text_model_factory:
@@ -128,6 +153,7 @@ class VeriAgent(DefaultAgent):
         msgs = mask_observations(
             self.messages, keep_last=self.config.keep_last_observations, chunk=self.config.mask_chunk
         )
+        chars_before = _chars(self.messages, raw=True)
         message = None
         while message is None:
             try:
@@ -144,17 +170,31 @@ class VeriAgent(DefaultAgent):
                     self._finish_on_limit("ContextOverflow")
                 self._overflow_level += 1
                 self.emit("compact", level=self._overflow_level, reason=type(e).__name__)
+        chars_sent = _chars(sent)
+        self.context["chars_before"] += chars_before
+        self.context["chars_sent"] += chars_sent
+        self.context["chars_reduced"] += max(0, chars_before - chars_sent)
         self.cost += message.get("extra", {}).get("cost", 0.0)
         self._account_tokens(message)
         self.add_messages(message)
+        self._detect_task_type(message.get("content") or "")
         self.emit(
             "model",
+            context={"chars_before": chars_before, "chars_sent": chars_sent},
             content=message.get("content") or "",
             actions=[a.get("command", "") for a in message.get("extra", {}).get("actions", [])],
             tokens=dict(self.tokens),
             cost=self.cost,
         )
         return message
+
+    def _detect_task_type(self, content: str) -> None:
+        if self.task_type:
+            return
+        if m := TASK_TYPE_RE.search(content):
+            raw = m.group(1).lower()
+            self.task_type = next((v for k, v in TASK_TYPES.items() if raw.startswith(k)), "other")
+            self.emit("task_type", task_type=self.task_type)
 
     def _handle_model_failure(self, e: Exception) -> None:
         """API died mid-run (after retries): still verify + submit the best work so far."""
@@ -186,6 +226,7 @@ class VeriAgent(DefaultAgent):
             self.emit("action", command=command)
             if blocked := check_command(command):
                 output = {"output": blocked, "returncode": 1, "exception_info": ""}
+                self.emit("blocked", command=command)
             else:
                 try:
                     output = self.env.execute(action)
@@ -193,6 +234,9 @@ class VeriAgent(DefaultAgent):
                     output = self._on_submit()  # raises Submitted if accepted
             if nudge := self.loop.record(command, output.get("output", ""), output.get("returncode")):
                 output = {**output, "output": (output.get("output") or "") + "\n\n" + nudge}
+                self.emit("loop_nudge", command=command)
+            if action.get("salvaged_tool_call") or action.get("leaked_tool_call"):
+                self.emit("salvaged", command=command)
             if EDIT_COMMAND.search(command):
                 try:  # live patch for the UI (edits only, to keep git calls rare)
                     self.emit("patch", diff=self.ws.diff(), files=self.ws.changed_files())
@@ -213,31 +257,44 @@ class VeriAgent(DefaultAgent):
 
     # ------------------------------------------------------------------ verification gate
     def _verify(self) -> VerificationResult:
+        """Run the harness verifier. A verifier crash is recorded as a FAILED round (never as success)."""
         round_no = len(self.attempts) + 1
         self.emit("verify_start", round=round_no)
-        res = self.verifier.verify(
-            round_no,
-            allow_missing_repro=round_no >= 2,
-            allow_weak_repro=round_no >= 2,
-        )
+        try:
+            res = self.verifier.verify(round_no, task_type=self.task_type)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            self.emit("verify_error", error=err)
+            res = VerificationResult(
+                round=round_no,
+                diff=self._safe_diff(),
+                checks=[Check("verifier", "fail", f"VERIFICATION ERROR (harness verifier crashed): {err}")],
+                passed=False,
+                feedback=(
+                    f"HARNESS VERIFICATION ERROR: the verifier could not check your change ({err}). "
+                    "Your submission was NOT accepted. Make sure the repository is in a runnable state "
+                    "(syntax, imports, reproduce_issue.py), then submit again."
+                ),
+                score=(0, 0, 0, 0, 0),
+            )
         self.attempts.append(res)
         self.emit("verify", result=res)
         return res
 
-    def _on_submit(self) -> dict:
+    def _safe_diff(self) -> str:
         try:
-            res = self._verify()
-        except Exception as e:  # never lose the agent's work because the gate itself broke
-            self.emit("verify_error", error=f"{type(e).__name__}: {e}")
-            diff = self.ws.diff()
-            self.final_status = f"Submitted (verifier error: {type(e).__name__})"
-            raise Submitted(
-                {"role": "exit", "content": diff, "extra": {"exit_status": self.final_status, "submission": diff}}
-            )
+            return self.ws.diff()
+        except Exception:
+            return ""
+
+    def _on_submit(self) -> dict:
+        res = self._verify()
         if res.passed:
-            self._accept(res, "Submitted (verified)")
+            self._accept(res, "VERIFIED")
         if len(self.attempts) >= self.config.max_verification_rounds:
-            self._accept(self._best(), "Submitted (verification incomplete)")
+            self._accept(
+                self._best(), f"UNVERIFIED: no objective evidence after {len(self.attempts)} verification rounds"
+            )
         return {"output": res.feedback, "returncode": 1, "exception_info": ""}
 
     def _best(self) -> VerificationResult:
@@ -263,12 +320,12 @@ class VeriAgent(DefaultAgent):
 
     def _finish_on_limit(self, reason: str) -> None:
         """Out of budget: verify the current state, and submit the best patch we have instead of nothing."""
-        current = self.ws.diff()
+        current = self._safe_diff()
         if current.strip() and (not self.attempts or self.attempts[-1].diff != current):
             self._verify()
         if self.attempts:
             best = self._best()
-            status = f"AutoSubmitted after {reason}" + (" (verified)" if best.passed else " (unverified)")
+            status = f"VERIFIED (best patch, stopped by {reason})" if best.passed else f"UNVERIFIED: stopped by {reason}"
             self._accept(best, status, exc_cls=LimitsExceeded)
         self.final_status = f"Stopped: {reason} (no changes)"
         raise LimitsExceeded(
@@ -291,6 +348,8 @@ class VeriAgent(DefaultAgent):
                 "info": {
                     "veriswe": {
                         "tokens": self.tokens,
+                        "context": self.context,
+                        "task_type": self.task_type,
                         "final_status": self.final_status,
                         "verification_attempts": [a.to_dict() for a in self.attempts],
                     }

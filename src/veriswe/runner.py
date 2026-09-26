@@ -20,6 +20,7 @@ from veriswe.agent import EventHandler, VeriAgent
 from veriswe.environment import VeriEnvironment
 from veriswe.intake import Issue, read_issue, resolve_repo
 from veriswe.model_config import ResolvedModel, probe_action_mode, resolve_model
+from veriswe.telemetry import Telemetry, render_box
 from veriswe.workspace import Workspace
 
 RUNS_DIR = repo_root / "runs"
@@ -82,7 +83,8 @@ def run_task(
     agent_overrides: dict | None = None,
 ) -> RunResult:
     """Solve one issue end-to-end. `model`/`mode` can be injected (tests); otherwise resolved from env/config."""
-    on_event = on_event or (lambda k, d: None)
+    telemetry = Telemetry()
+    on_event = telemetry.wrap(on_event or (lambda k, d: None))
     t0 = time.time()
     agent_cfg = load_agent_yaml()
 
@@ -105,6 +107,7 @@ def run_task(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = RUNS_DIR / f"{stamp}-{repo.name}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    telemetry.attach(run_dir)
 
     env_cfg = agent_cfg.get("environment", {})
     env = VeriEnvironment(
@@ -151,8 +154,13 @@ def run_task(
         retry_logger.propagate = True
     patch = ws.diff()
     final = agent.final
-    status = agent.final_status or (f"Error: {error}" if error else "Finished")
+    last_exit = (agent.messages[-1].get("extra") or {}).get("exit_status", "") if agent.messages else ""
+    status = agent.final_status or (f"Error: {error}" if error else f"UNVERIFIED: agent stopped ({last_exit or 'no submission'})")
     verified = bool(final and final.passed and final.diff == patch)
+    try:
+        files = ws.changed_files()
+    except Exception:
+        files = []
     stats = {
         "model": model_display or getattr(getattr(model, "config", None), "model_name", "?"),
         "action_mode": agent.config.action_mode + (" (switched from toolcall)" if agent.config.action_mode != mode else ""),
@@ -162,6 +170,7 @@ def run_task(
         "wall_seconds": round(time.time() - t0, 1),
         "verification_rounds": len(agent.attempts),
     }
+    stats["telemetry"] = telemetry.write_summary(run_dir, status=status, verified=verified, files=files)
     _collect_artifacts(ws, run_dir)
     (run_dir / "patch.diff").write_text(patch)
     report = render_report(issue, ws, status, verified, patch, agent, stats, error)
@@ -231,11 +240,21 @@ def render_report(issue: Issue, ws: Workspace, status, verified, patch, agent: V
         f"({t['cached']:,} cached), {t['completion']:,} completion tokens, ${stats['cost_usd']}, "
         f"{stats['wall_seconds']}s wall",
     ]
+    if not verified and patch.strip():
+        lines += [
+            "",
+            "> **UNVERIFIED** - the harness could not obtain objective evidence that this patch achieves the task. "
+            "It is preserved for inspection only and must not be treated as a successful submission.",
+        ]
     if error:
         lines += ["", f"**Error:** `{error}`"]
+    if tel := stats.get("telemetry"):
+        lines += ["", "## Agent execution (telemetry)", "", "```", render_box(tel), "```",
+                  "", "Full event log: `telemetry.jsonl` - summary: `telemetry_summary.json`."]  # fmt: skip
     final = agent.final
     if final:
-        lines += ["", "## Verification evidence (accepted patch)", "", "| Check | Result | Details |", "|---|---|---|"]
+        title = "Verification evidence (accepted patch)" if final.passed else "Verification checks (best UNVERIFIED attempt)"
+        lines += ["", f"## {title}", "", "| Check | Result | Details |", "|---|---|---|"]
         for c in final.checks:
             lines.append(f"| {c.name} | {ICON.get(c.status, c.status)} | {c.summary.replace('|', '/')} |")
         for c in final.checks:

@@ -40,6 +40,9 @@ class Check:
     status: str  # pass | fail | warn | skip
     summary: str
     log: str = ""
+    evidence: list[str] = field(default_factory=list)
+    """Objective proofs this check produced (e.g. tests that fail on the original code and pass after)."""
+    data: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -287,26 +290,30 @@ class Verifier:
                 src_paths = [str(self.repo / d) for d in ("src", "lib") if (self.repo / d).is_dir()]
                 self._test_env = {"PYTHONPATH": os.pathsep.join([str(self.repo), *src_paths])}
             after, out_a, rc_a = self._pytest(python, files, "after")
-            failed_after = {t for t, o in after.items() if o == "failed"}
-            n_pass = sum(1 for o in after.values() if o == "passed")
-            if rc_a in (0, 5) and not failed_after:
-                return Check("tests", "pass", f"{n_pass} related tests pass ({len(files)} files: {', '.join(files)})", tail(out_a, 1500))
             if not after:
                 # collection error etc. - see whether it also happens on the original code
-                _, out_b, rc_b = self._on_original(patch, lambda: self._pytest(python, files, "before"))
+                _, out_b, rc_b = self._on_original(patch, lambda: self._pytest(python, self._existing(files), "before"))
                 if rc_b == rc_a:
                     return Check("tests", "warn", f"test run errors both before and after the patch (rc={rc_a}); inconclusive", tail(out_a))
                 return Check("tests", "fail", f"test run broke after the patch (rc={rc_a}, was {rc_b})", tail(out_a))
-            before, _, _ = self._on_original(patch, lambda: self._pytest(python, files, "before"))
+            # Always compare with the original code: regressions AND evidence (tests that go fail -> pass).
+            # Test files the patch adds do not exist on the original code, so their tests count as "not passing before".
+            before, _, _ = self._on_original(patch, lambda: self._pytest(python, self._existing(files), "before"))
+            failed_after = {t for t, o in after.items() if o == "failed"}
+            n_pass = sum(1 for o in after.values() if o == "passed")
             new_failures = sorted(t for t in failed_after if before.get(t) == "passed")
             new_tests_failing = sorted(t for t in failed_after if t not in before)
             preexisting = sorted(t for t in failed_after if before.get(t) == "failed")
+            fail_to_pass = sorted(t for t, o in after.items() if o == "passed" and before.get(t) != "passed")
+            pass_both = sum(1 for t, o in after.items() if o == "passed" and before.get(t) == "passed")
+            data = {"files": files, "passed": n_pass, "pass_both": pass_both, "fail_to_pass": fail_to_pass}
             if new_failures:
                 return Check(
                     "tests",
                     "fail",
                     f"{len(new_failures)} test(s) that passed on the original code now FAIL: {', '.join(new_failures[:8])}",
                     tail(out_a),
+                    data=data,
                 )
             if new_tests_failing:
                 return Check(
@@ -314,14 +321,25 @@ class Verifier:
                     "fail",
                     f"{len(new_tests_failing)} newly added test(s) fail: {', '.join(new_tests_failing[:8])}",
                     tail(out_a),
+                    data=data,
                 )
+            summary = f"no regressions: {n_pass} related tests pass ({len(files)} files)"
+            if fail_to_pass:
+                summary += f"; {len(fail_to_pass)} test(s) fail on the original code and pass now"
+            if preexisting:
+                summary += f"; {len(preexisting)} were already failing before the patch"
             return Check(
                 "tests",
                 "pass",
-                f"no regressions: {n_pass} pass; {len(preexisting)} failing test(s) were already failing before the patch",
+                summary,
                 tail(out_a, 1500),
+                evidence=[f"test fails on original code, passes now: {t}" for t in fail_to_pass],
+                data=data,
             )
         return self._generic_tests(patch, changed)
+
+    def _existing(self, files: list[str]) -> list[str]:
+        return [f for f in files if (self.repo / f).is_file()]
 
     def _generic_tests(self, patch: str, changed: list[str]) -> Check:
         """Non-Python projects: run the natural test command and compare with the original code by exit code."""
@@ -341,15 +359,16 @@ class Verifier:
         if not cmd:
             return Check("tests", "skip", "no test runner detected for the changed files")
         rc_a, out_a, _ = _run(cmd, self.repo, self.test_timeout)
-        if rc_a == 0:
-            return Check("tests", "pass", f"`{' '.join(cmd)}` passes", tail(out_a, 1500))
         rc_b, _, _ = self._on_original(patch, lambda: _run(cmd, self.repo, self.test_timeout))
+        if rc_a == 0:
+            ev = [f"`{' '.join(cmd)}` fails on the original code and passes now"] if rc_b != 0 else []
+            return Check("tests", "pass", f"`{' '.join(cmd)}` passes", tail(out_a, 1500), evidence=ev, data={"pass_both": int(rc_b == 0)})
         if rc_b != 0:
             return Check("tests", "warn", f"`{' '.join(cmd)}` fails before and after the patch; inconclusive", tail(out_a))
         return Check("tests", "fail", f"`{' '.join(cmd)}` passed on the original code but FAILS with the patch", tail(out_a))
 
     # ------------------------------------------------------------------ main entry
-    def verify(self, round_no: int, *, allow_missing_repro: bool, allow_weak_repro: bool) -> VerificationResult:
+    def verify(self, round_no: int, *, task_type: str = "") -> VerificationResult:
         t0 = time.time()
         patch = self.ws.diff()
         res = VerificationResult(round=round_no, diff=patch)
@@ -384,37 +403,42 @@ class Verifier:
         res.checks.append(tests)
         touched_tests = [c for c in changed if _is_test_file(c)]
         if touched_tests:
-            res.checks.append(Check("test_files_modified", "warn", f"patch modifies test files: {', '.join(touched_tests[:6])}"))
+            res.checks.append(Check("test_files_modified", "warn", f"patch modifies/adds test files: {', '.join(touched_tests[:6])}"))
+
+        # ---- objective evidence: something that FAILS on the original code and PASSES with the change
+        evidence: list[str] = []
+        strong_repro = bool(repro_before and repro_before.status == "pass" and repro_after.status == "pass")
+        if strong_repro:
+            evidence.append("reproduce_issue.py fails on the original code and passes with the change")
+        evidence += tests.evidence
+        if task_type == "refactor" and tests.status == "pass" and tests.data.get("pass_both", 0) > 0:
+            evidence.append(f"refactor: {tests.data['pass_both']} related test(s) pass before and after (behaviour preserved)")
+        res.checks.append(
+            Check("evidence", "pass", "; ".join(evidence[:4]) + (f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""))
+            if evidence
+            else Check("evidence", "fail", "no objective evidence that the change achieves the task")
+        )
 
         ok_syntax = syntax.status == "pass"
-        ok_repro = repro_after.status == "pass"
         ok_tests = tests.status in ("pass", "skip", "warn")
-        strong_repro = bool(repro_before and repro_before.status == "pass")
-        res.score = (int(ok_syntax), int(ok_tests), int(ok_repro), int(strong_repro), int(tests.status == "pass"))
+        res.score = (int(ok_syntax), int(ok_tests), int(bool(evidence)), int(repro_after.status != "fail"), len(evidence))
 
         problems = []
         if not ok_syntax:
             problems.append(("Syntax errors in changed files", syntax))
         if repro_after.status == "fail":
-            problems.append(("Your reproduction script still fails on the patched code", repro_after))
+            problems.append(("Your reproduce_issue.py still fails on the changed code", repro_after))
         if tests.status == "fail":
             problems.append(("Regression tests", tests))
-        if repro_after.status == "skip" and not allow_missing_repro:
-            problems.append(
-                (
-                    "No reproduction script. Create `reproduce_issue.py` in the repo root that asserts the correct "
-                    "behaviour from the issue (exit non-zero on the original code, 0 when fixed) and run it",
-                    None,
-                )
+        if not evidence:
+            hint = (
+                "No objective evidence that your change achieves the task. The harness does not accept a claim of "
+                "success. Provide at least one of: (a) `reproduce_issue.py` in the repo root that FAILS on the original "
+                "code and PASSES now (check with `check_repro`); (b) a test in the project's test suite that fails on "
+                "the original code and passes now (features, test fixes); (c) for a declared refactor "
+                "(TASK TYPE: refactor), related existing tests that pass before and after"
             )
-        if repro_before and repro_before.status == "warn" and not allow_weak_repro:
-            problems.append(
-                (
-                    "Your reproduce_issue.py exits 0 on the ORIGINAL code too, so it does not prove the bug is fixed. "
-                    "Strengthen it so it fails on the original code (the harness runs it with your patch reverted)",
-                    repro_before,
-                )
-            )
+            problems.append((hint, repro_before if repro_before and repro_before.status == "warn" else None))
         res.passed = not problems
         if problems:
             parts = ["HARNESS VERIFICATION FAILED - your submission was not accepted. Problems:"]

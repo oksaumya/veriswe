@@ -374,3 +374,23 @@ def test_refuses_folders_inside_the_harness_source(tmp_path):
     with pytest.raises(ValueError, match="part of the VeriSWE harness"):
         resolve_repo(str(repo_root / "tests" / "veriswe" / "fixtures" / "calc"), Issue(title="", body="x"), repo_root / "workspace")
     assert not (repo_root / "tests" / "veriswe" / "fixtures" / "calc" / ".git").exists()
+
+
+def test_headless_printer_survives_markup_in_model_and_tool_output(capsys):
+    from veriswe.cli import HeadlessPrinter
+
+    pr = HeadlessPrinter()
+    nasty = "returns data[mid] and [/bold] [red] unbalanced [/] tags"
+    pr("model", {"step": 1, "content": nasty})
+    pr("observation", {"output": nasty, "returncode": 1})
+    pr("model_error", {"error": nasty})
+    out = capsys.readouterr().out
+    assert "data[mid]" in out and "[/bold]" in out
+
+
+def test_context_measurement_counts_truncation_and_masking():
+    from veriswe.agent import _chars
+
+    msgs = [{"role": "tool", "content": "head…tail", "extra": {"raw_output": "x" * 50_000}}]
+    assert _chars(msgs) == len("head…tail")
+    assert _chars(msgs, raw=True) == 50_000

@@ -1,17 +1,18 @@
 # VeriSWE: a verification-first coding-agent harness
 
-VeriSWE turns a text-only foundation model into an autonomous software engineer. It takes a GitHub issue and a repository, then:
+VeriSWE turns a text-only foundation model into an autonomous software engineer. It takes a software-engineering task (a GitHub issue, a bug report, a feature, a failing test or a refactor) and a repository, then:
 
-1. finds the relevant code
-2. reproduces the bug
-3. fixes it
-4. has the harness prove the fix before any submission is accepted
+1. explores the code
+2. establishes **objective evidence** first: a reproduction or test that fails on the original code
+3. makes the change
+4. has **the harness** prove the result before anything is accepted
 
-Every run ends with a patch plus an evidence report showing:
+A result is **VERIFIED** only with evidence that fails on the original code and passes with the change, and without regressions. Otherwise it is marked **UNVERIFIED**: the patch is kept for inspection but never presented as a success. Every run ends with the patch, an evidence report, and telemetry (`telemetry.jsonl`, `telemetry_summary.json`) that shows the autonomy, recovery, verification and context efficiency.
 
-- a reproduction that fails on the original code and passes on the fixed code
-- regression tests compared against the original code
-- the tokens, cost and time spent
+**For judges:**
+- [docs/hackathon/REQUIREMENTS.md](docs/hackathon/REQUIREMENTS.md) maps each requirement to the implementation and to its evidence.
+- [docs/hackathon/DEMO_RUNBOOK.md](docs/hackathon/DEMO_RUNBOOK.md) is the demo script.
+- `make demo-recovery` shows failure, recovery and verification offline in about 10 seconds.
 
 > Same model. Different harness. **Evidence over claims.**
 
@@ -35,7 +36,9 @@ make run ISSUE=https://github.com/owner/repo/issues/123          # clones the re
 make run ISSUE="<issue text>" REPO=/path/to/checked-out/repo
 make run ISSUE=@issue.md REPO=/path/to/repo HEADLESS=1          # plain streaming output (CI / no TTY)
 echo "<issue text>" | make run REPO=/path/to/repo                # stdin
-make demo                                                        # solve the bundled demo bug end-to-end
+make run TASK="Add a --json flag to the CLI" REPO=/path/to/repo  # any software-engineering task
+make demo                                                        # solve the bundled demo bug end-to-end (live model)
+make demo-recovery                                               # offline: failure -> recovery -> VERIFIED (no key)
 ```
 
 When stdin is not a terminal, VeriSWE runs headless automatically.
@@ -62,7 +65,9 @@ Each run writes to `runs/<timestamp>-<repo>/`:
 | File | Contents |
 |---|---|
 | `patch.diff` | Final patch against the starting commit. It is also left applied in the repository. |
-| `report.md` | Status, the verification evidence table, history, token and cost stats, and the patch. |
+| `report.md` | Status (VERIFIED/UNVERIFIED), the AGENT EXECUTION box, the evidence table, verification history, and the patch. |
+| `telemetry.jsonl` | Every harness event (model calls, tool calls, results, failures, recoveries, verification rounds), with secrets redacted. |
+| `telemetry_summary.json` | Counts of calls, failures, recovery events and verification rounds, context chars before/sent/reduced, and tokens. |
 | `result.json` | Machine-readable summary. |
 | `trajectory.json` | Full agent trajectory with every message, command and output. Secrets are redacted. |
 | `evidence/` | The reproduction script and JUnit XML files from the harness test runs. |
@@ -136,8 +141,10 @@ The DeepSeek and Qwen behaviour is covered offline by full end-to-end runs again
 
 | Module | Role |
 |---|---|
-| `src/veriswe/agent.py` | `VeriAgent`, a subclass of mini's `DefaultAgent`. Adds guards, masking, token accounting, the verification gate, checkpoint restore and autosubmit. |
+| `src/veriswe/agent.py` | `VeriAgent`, a subclass of mini's `DefaultAgent`. Adds guards, masking, token accounting, the verification gate, checkpoint restore, task-type detection and context measurement. |
 | `src/veriswe/verify.py` | The harness-run verification gate. |
+| `src/veriswe/telemetry.py` | Durable telemetry (`telemetry.jsonl`, `telemetry_summary.json`) and the AGENT EXECUTION summary box. |
+| `src/veriswe/demo.py` | The offline recovery demo (`make demo-recovery`). |
 | `src/veriswe/tools/` | Helper CLIs the model uses from bash: `view`, `search`, `str_replace`, `undo_edit`. |
 | `src/veriswe/context.py` | Cache-friendly observation masking and emergency compaction on context overflow. |
 | `src/veriswe/guards.py` | Blocked commands and the loop/stuck detector. |
@@ -150,14 +157,19 @@ The DeepSeek and Qwen behaviour is covered offline by full end-to-end runs again
 
 Each addition targets a failure mode documented in recent coding-agent research.
 
-1. **Verification gate (the largest lever).** When the agent says it is done, the harness checks the work itself and does not rely on the model's claim.
+1. **Verification gate (the largest lever).** When the agent says it is done, the harness checks the work itself and does not rely on the model's claim. **VERIFIED requires objective evidence**, meaning something that fails on the original code and passes with the change:
+   - `reproduce_issue.py`, for bugs
+   - a new or previously failing test, for features and test fixes
+   - for a declared refactor, related tests that pass both before and after
+
+   Without such evidence the result is **UNVERIFIED**, the patch is preserved, and this rule is never relaxed in later rounds. A verifier crash is recorded as a failed round and fed back to the agent. It is never accepted.
    - The patch must be non-empty and every changed file must still parse.
    - `reproduce_issue.py` is run on the patched code, where it must pass, and on the original code with the patch temporarily reverted, where it must fail. A reproduction that passes on the original code is rejected as weak evidence.
    - Targeted regression tests are selected from the changed modules: tests the agent touched, tests matching by name, and tests that import the module. They run with JUnit XML output, and only tests that passed before the patch and fail after it count against the patch. Pre-existing failures are not blamed on the agent.
    - On failure, the agent receives the exact logs and keeps working, for up to `max_verification_rounds` rounds.
 
    Motivation: "stopping without verifying" is the most common agent failure. LangChain gained +13.7pp on Terminal-Bench 2 mostly from a pre-completion verification step.
-2. **Best-checkpoint restore and autosubmit.** Every verification attempt is scored. If later work makes things worse, or a step, time or context limit is reached, VeriSWE submits the best patch it has instead of nothing or a regression. This targets the "correct edit later overwritten" failure mode.
+2. **Best-checkpoint restore.** Every verification attempt is scored. If later work makes things worse, or a step, time or context limit is reached, VeriSWE keeps the best patch it has instead of nothing or a regression. Its status says honestly whether that patch is VERIFIED or UNVERIFIED. This targets the "correct edit later overwritten" failure mode.
 3. **Lint-gated `str_replace` editing.** SEARCH/REPLACE blocks must match exactly one location. Uniform indentation mistakes are auto-corrected. Ambiguous or missing matches return a helpful hint with the closest lines. Edits that break syntax (Python, JSON, JS, YAML, TOML) are reverted automatically. Every edit echoes the resulting snippet with line numbers, and `undo_edit` is available. In SWE-agent's ablations, lint-on-edit gave +3pp and removing the edit tool cost −7.7pp.
 4. **Windowed `view` and capped `search`.** Files are shown in 100-line windows, which SWE-agent found to beat both whole files and 30-line windows. Search uses ripgrep with a grep fallback and bounded output.
 5. **Context efficiency.**
@@ -183,7 +195,7 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs **96 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **621 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
+`make test` runs **104 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **631 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
 
 The suite covers:
 
@@ -193,7 +205,11 @@ The suite covers:
   - the happy path is verified
   - the gate rejects an empty patch and then a regressing patch
   - a missing reproduction is requested
-  - a step limit triggers autosubmit of the best patch
+  - a step limit keeps the best verified patch
+  - no evidence means UNVERIFIED, and this is never relaxed
+  - a new failing→passing test counts as evidence (feature flow), and a declared refactor is verified by preserved behaviour
+  - a verifier crash is never a submission
+  - the telemetry artifacts are written, and the offline recovery demo works
   - the best checkpoint is restored
   - blocked commands do not run
   - the API key never reaches the shell or the trajectory

@@ -181,9 +181,10 @@ class VeriApp(App):
     #result, #stats, #verify, #files { height: auto; margin-bottom: 1; }
     """
 
-    def __init__(self, issue=None, repo=None, model=None, agent_overrides=None):
+    def __init__(self, issue=None, repo=None, model=None, agent_overrides=None, replay: dict | None = None):
         super().__init__()
         self._issue, self._repo, self._model = issue, repo, model
+        self._replay = replay
         self._overrides = agent_overrides
         self.stats = {
             "model": "resolving...",
@@ -223,7 +224,7 @@ class VeriApp(App):
         from veriswe.runner import run_task
 
         try:
-            run_task(issue, repo, model_override=self._model, on_event=self._on_event_thread, agent_overrides=self._overrides)
+            run_task(issue, repo, model_override=self._model, on_event=self._on_event_thread, agent_overrides=self._overrides, **(self._replay or {}))
         except Exception as e:  # config / intake errors: show them in the UI
             self.call_from_thread(self._fatal, f"{type(e).__name__}: {e}")
 
@@ -329,6 +330,15 @@ class VeriApp(App):
             if not r.passed:
                 self._set_phase("Fix", force=True)
                 self._log(Text("The harness sent the failures back to the agent.", style="yellow"))
+        elif kind == "task_type":
+            s["task_type"] = d["task_type"]
+            self._log(Text.assemble(("● ", "cyan"), ("Task type  ", "bold"), (d["task_type"], "cyan")))
+        elif kind == "verify_error":
+            self._log(Panel(escape(d["error"][:400]), title="VERIFICATION ERROR - patch not accepted", border_style="red"))
+        elif kind in ("format_error", "salvaged", "loop_nudge", "blocked"):
+            label = {"format_error": "Malformed reply - asked the model to retry", "salvaged": "Recovered a tool call the API rejected",
+                     "loop_nudge": "Repetition detected - nudged the agent", "blocked": "Blocked an unsafe command"}[kind]  # fmt: skip
+            self._log(Text(f"⟲ {label}", style="yellow"))
         elif kind == "api_retry":
             s["status"] = f"API: {d['detail']}"
             self._log(Text(f"⟳ API {d['detail']}", style="dim yellow"))
@@ -360,17 +370,30 @@ class VeriApp(App):
         s.update(status=res.status, busy=False)
         self._set_phase("Done", force=True)
         self._show_patch(res.patch)
-        t = res.stats.get("tokens", {})
+        tel = res.stats.get("telemetry") or {}
+        tok = (tel.get("tokens") or {}).get("total", 0)
         summary = Table.grid(padding=(0, 1))
-        summary.add_row("[dim]Status[/]", escape(res.status))
-        summary.add_row("[dim]Steps[/]", str(res.stats.get("steps")))
-        summary.add_row("[dim]Tokens[/]", f"{t.get('prompt', 0) + t.get('completion', 0):,}")
-        summary.add_row("[dim]Time[/]", fmt_duration(res.stats.get("wall_seconds", 0)))
-        summary.add_row("[dim]Report[/]", escape(str(res.report_path)))
-        title, style = ("✓ VERIFIED FIX", "green") if res.verified else (("! UNVERIFIED PATCH", "yellow") if res.patch.strip() else ("✗ NO PATCH", "red"))
-        self._update_result(Panel(summary, title=f"[b]{title}[/b]", border_style=style))
+        summary.add_column(style="dim", no_wrap=True)
+        summary.add_column(justify="right")
+        summary.add_row("Task type", escape(str(tel.get("task_type", "-"))))
+        summary.add_row("Model calls", str(tel.get("model_calls", res.stats.get("steps"))))
+        summary.add_row("Tool calls", str(tel.get("tool_calls", "-")))
+        summary.add_row("Files changed", str(tel.get("files_changed", len(self.files))))
+        summary.add_row("Failures", str(tel.get("failures", "-")))
+        summary.add_row("Recovery events", str(tel.get("recovery_events", "-")))
+        summary.add_row("Verification rounds", str(tel.get("verification_rounds", self.verify_round)))
+        summary.add_row("Context reduced", f"{tel.get('context_chars_reduced', 0) / 1000:.1f}K chars ({tel.get('context_reduction_pct', 0)}%)")
+        summary.add_row("Tokens", f"{tok / 1000:.1f}K" if tok >= 1000 else str(tok))
+        summary.add_row("Time", fmt_duration(res.stats.get("wall_seconds", 0)))
+        summary.add_row("Final status", "[b green]VERIFIED[/]" if res.verified else "[b yellow]UNVERIFIED[/]")
+        title, style = ("✓ VERIFIED", "green") if res.verified else (("! UNVERIFIED - patch kept for inspection", "yellow") if res.patch.strip() else ("✗ NO PATCH", "red"))
+        self._update_result(Panel(summary, title=f"[b]AGENT EXECUTION · {title}[/b]", border_style=style))
         self._log(Rule(f"[b {style}]{title}[/]", style=style))
-        self._log(Text(f"Report: {res.report_path}\nPatch:  {res.run_dir / 'patch.diff'}\nPress p for the patch, Ctrl+Q to quit.", style="dim"))
+        self._log(Text(
+            f"Report:    {res.report_path}\nPatch:     {res.run_dir / 'patch.diff'}\n"
+            f"Telemetry: {res.run_dir / 'telemetry.jsonl'} (+ telemetry_summary.json)\nPress p for the patch, Ctrl+Q to quit.",
+            style="dim",
+        ))
         if res.patch.strip() and (tabs := self._q("#tabs", TabbedContent)):
             tabs.active = "patch"
         self.notify(title, severity="information" if res.verified else "warning", timeout=8)
@@ -416,6 +439,7 @@ class VeriApp(App):
         grid.add_row("Status", status)
         grid.add_row("Model", escape(str(s["model"])))
         grid.add_row("Actions", escape(s.get("mode") or "-"))
+        grid.add_row("Task type", escape(s.get("task_type") or "-"))
         grid.add_row("Steps", steps)
         grid.add_row("Tokens", f"in {prompt:,}{cache_pct}")
         grid.add_row("", f"out {completion:,}")

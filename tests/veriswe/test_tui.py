@@ -41,7 +41,7 @@ def test_tui_intake_and_run(calc_repo, monkeypatch, tmp_path):
             return app, patch_lines
 
     app, patch_text = asyncio.run(drive())
-    assert app.result.verified and app.stats["status"].startswith("Submitted (verified)")
+    assert app.result.verified and app.stats["status"] == "VERIFIED"
     assert app.phase == "Done" and app.verify_passed is True
     assert app.stats["step"] == 6 and app.stats["step_limit"] > 0
     assert "calc/stats.py" in app.files
