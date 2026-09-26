@@ -93,15 +93,40 @@ def adapt_to_provider_error(e: Exception, kwargs: dict) -> bool:
     return True
 
 
-def adaptive_completion(model: str, messages: list[dict], kwargs: dict, **call_kwargs):
-    """litellm.completion that learns provider quirks; `kwargs` is updated in place so later calls reuse the fix."""
-    for _ in range(3):
+TRANSIENT_ERRORS = (
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.InternalServerError,
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.Timeout,
+)
+
+
+def adaptive_completion(model: str, messages: list[dict], kwargs: dict, *, max_waits: int = 8, **call_kwargs):
+    """litellm.completion that learns provider quirks and rides out transient errors.
+
+    `kwargs` is updated in place, so later calls reuse any learned fix (e.g. Qwen enable_thinking=false).
+    Rate limits wait for the provider's suggested time; other transient errors back off exponentially.
+    """
+    adaptations = waits = 0
+    while True:
         try:
             return litellm.completion(model=model, messages=messages, **call_kwargs, **kwargs)
         except litellm.exceptions.BadRequestError as e:
-            if not adapt_to_provider_error(e, kwargs):
+            if adaptations < 3 and adapt_to_provider_error(e, kwargs):
+                adaptations += 1
+                continue
+            raise
+        except TRANSIENT_ERRORS as e:
+            if isinstance(e, litellm.exceptions.RateLimitError) and is_request_too_large(e):
+                raise RequestTooLargeError(str(e)[:500]) from e
+            if waits >= max_waits:
                 raise
-    return litellm.completion(model=model, messages=messages, **call_kwargs, **kwargs)
+            suggested = retry_after_seconds(e) if isinstance(e, litellm.exceptions.RateLimitError) else None
+            wait = min((suggested + 0.5) if suggested is not None else 2 ** (waits + 1), 90)
+            waits += 1
+            logger.warning(f"Retrying query in {wait:.1f} seconds as it raised {type(e).__name__}")
+            time.sleep(wait)
 
 
 class _NoBlindRetryMixin:

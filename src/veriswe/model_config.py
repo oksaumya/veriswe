@@ -388,6 +388,8 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
     except Exception as e:
         if problem := account_problem(e):
             raise ModelConfigError(f"{resolved.display}: {problem}") from e
+        if isinstance(e, (litellm.exceptions.RateLimitError, litellm.exceptions.APIConnectionError, litellm.exceptions.Timeout)):
+            raise ModelConfigError(f"{resolved.display}: the provider kept refusing requests after retries: {e}") from e
         # Tools probably unsupported; check the model answers at all without tools.
         try:
             adaptive_completion(resolved.model_name, [{"role": "user", "content": "Reply with: ok"}], kwargs)

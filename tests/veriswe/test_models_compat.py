@@ -163,3 +163,25 @@ def test_discovery_returns_without_waiting_for_slow_hosts(monkeypatch):
     t = time.time()
     ep = mc._real_discover_endpoint("sk-x")
     assert ep.provider == "deepseek" and time.time() - t < 1.5
+
+
+def test_probe_survives_rate_limits(monkeypatch):
+    from veriswe.model_config import ResolvedModel, probe_action_mode
+
+    calls = {"n": 0}
+    ok = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[object()], content=""))])
+
+    def completion(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise litellm.exceptions.RateLimitError(
+                message="Rate limit reached ... output tokens per minute (OTPM): Limit 1000, Used 520, Requested 508. Please try again in 0.05s.",
+                model="groq/qwen/qwen3.8-27b",
+                llm_provider="groq",
+            )
+        return ok
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
+    assert probe_action_mode(r)[0] == "toolcall"
+    assert calls["n"] == 2
