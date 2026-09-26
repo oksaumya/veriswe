@@ -259,7 +259,12 @@ def resolve_model(
         )
 
     base_url = (env.get("AI_BASE_URL") or cfg.get("base_url") or "").strip()
+    # Tolerate a full endpoint URL: the client appends /chat/completions itself.
+    base_url = re.sub(r"/(chat/)?completions/?$", "", base_url.rstrip("/"))
     provider = (env.get("AI_PROVIDER") or cfg.get("provider") or "auto").strip().lower()
+    if provider != "auto" and provider not in LITELLM_PREFIX:
+        logger.warning(f"Unknown AI_PROVIDER {provider!r} (expected one of {sorted(LITELLM_PREFIX)}); detecting it instead")
+        provider = "auto"
     model_name = (cli_model or env.get("AI_MODEL") or cfg.get("model_name") or "").strip()
 
     if provider == "auto":

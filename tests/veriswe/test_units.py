@@ -353,3 +353,15 @@ def test_known_provider_prefers_qwen_or_deepseek_from_its_list(monkeypatch):
     # no DeepSeek/Qwen on offer -> configured provider default
     monkeypatch.setattr(mc, "list_provider_models", lambda *a, **k: ["openai/gpt-oss-120b"])
     assert mc.resolve_model(env={"AI_API_KEY": "gsk_abc"}, yaml_path=mc.config_dir / "model.yaml").model_name == "groq/openai/gpt-oss-120b"
+
+
+def test_tolerates_common_env_mistakes():
+    import veriswe.model_config as mc
+
+    r = mc.resolve_model(
+        env={"AI_API_KEY": "sk-or-v1-x", "AI_MODEL": "qwen/qwen3.8-27b:free", "AI_PROVIDER": "qwen/qwen3.8-27b:free"},
+        yaml_path=mc.config_dir / "model.yaml",
+    )
+    assert r.model_name == "openrouter/qwen/qwen3.8-27b:free"
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-x", "AI_MODEL": "m", "AI_BASE_URL": "https://h/api/v1/chat/completions"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.model_kwargs["api_base"] == "https://h/api/v1"
