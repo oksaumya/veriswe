@@ -16,6 +16,17 @@ jobs:
       - run: make setup
       - run: make test
 
+  # Our suite + the entire upstream mini-swe-agent suite
+  test-all:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: make setup
+      - run: make test-all
+
   # `make setup` must survive awkward machines, not just a prepared CI runner
   setup-edge-cases:
     runs-on: ubuntu-latest

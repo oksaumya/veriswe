@@ -98,6 +98,8 @@ def run_task(
         model = build_model(resolved, mode, agent_cfg)
         model_display = resolved.display
         text_model_factory = lambda: build_model(resolved, "text", agent_cfg)  # noqa: E731
+    else:
+        on_event("model_ready", {"model": model_display or "provided model", "mode": mode or "toolcall", "note": "model supplied by caller"})
     mode = mode or "toolcall"
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -122,6 +124,14 @@ def run_task(
     a["action_mode"] = mode
     a["output_path"] = run_dir / "trajectory.json"
     agent = VeriAgent(model, env, ws, on_event=on_event, text_model_factory=text_model_factory, **a)
+    on_event(
+        "run_config",
+        {
+            "step_limit": a.get("step_limit", 0),
+            "max_verification_rounds": a.get("max_verification_rounds", 0),
+            "run_dir": str(run_dir),
+        },
+    )
 
     error = ""
     retry_logger = logging.getLogger("litellm_model")

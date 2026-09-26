@@ -40,6 +40,23 @@ make demo                                                        # solve the bun
 
 When stdin is not a terminal, VeriSWE runs headless automatically.
 
+### The terminal UI
+
+`make run` opens a live dashboard:
+
+- **Intake screen.** Paste an issue URL or text, and optionally a repository. The screen confirms whether `AI_API_KEY` is set and which host it belongs to, without ever showing the key. Input is validated before a run starts.
+- **Phase pipeline.** A bar across the top shows `Setup → Explore → Reproduce → Fix → Verify → Done`, with the current phase animated. It moves back to *Fix* when the verification gate rejects a submission.
+- **Tabs:**
+  - `a` **Activity:** a timeline of step cards with the model's reasoning, each command with syntax highlighting, and a badge on each result.
+  - `p` **Patch:** the diff, updated live after every edit.
+  - `i` **Issue:** the issue, rendered.
+- **Sidebar:**
+  - **Result banner:** *VERIFIED FIX*, *UNVERIFIED PATCH* or *NO PATCH*.
+  - **Run panel:** status spinner, model, action mode, a steps/limit progress bar, tokens with cache-hit %, cost, and elapsed time.
+  - **Verification checklist:** ✓ ✗ ! – for each check, with the round number and the gate's verdict.
+  - **Changed files.**
+- **Keys:** `f` toggles auto-follow and `Ctrl+Q` quits.
+
 Each run writes to `runs/<timestamp>-<repo>/`:
 
 | File | Contents |
@@ -166,7 +183,9 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs 92 offline tests in under 30 seconds, with no network or API key:
+`make test` runs **94 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **621 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
+
+The suite covers:
 
 - **Unit tests:** provider detection, config and env overrides, a no-secrets-in-config check, guards, the loop detector, masking, intake, and workspace diffs and their round trip.
 - **Tool tests:** `str_replace` uniqueness, lint revert and undo; `view`; `search`.
@@ -178,6 +197,9 @@ Each addition targets a failure mode documented in recent coding-agent research.
   - the best checkpoint is restored
   - blocked commands do not run
   - the API key never reaches the shell or the trajectory
+- **Provider simulations:** complete runs against local fake servers that enforce the real DeepSeek rules (`reasoning_content` must be passed back) and Qwen rules (`enable_thinking`).
+- **Model compatibility:** leaked, malformed or server-rejected tool calls, billing, daily-quota and rate-limit handling, and key-to-host discovery.
+- **TUI:** the full intake → run → verified-result flow in a headless Textual pilot, input validation, and a check that the key is never displayed.
 
 ## Limits and knobs
 

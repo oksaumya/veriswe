@@ -23,6 +23,7 @@ help:
 	@echo "  make setup   - create .venv and install all dependencies"
 	@echo "  make run     - launch the harness (TUI; or ISSUE=... REPO=... HEADLESS=1)"
 	@echo "  make test    - offline test suite (no API key needed)"
+	@echo "  make test-all - our suite + the full upstream mini-swe-agent suite"
 	@echo "  make demo    - solve the bundled demo bug with the live model"
 	@echo "  make clean   - remove generated artefacts"
 
@@ -46,8 +47,11 @@ run: $(BIN)/veriswe
 test: $(BIN)/veriswe
 	@$(BIN)/python -m pytest tests/veriswe -q -p no:cacheprovider -W ignore::pytest.PytestConfigWarning
 
-test-all: $(BIN)/veriswe
-	@$(BIN)/python -m pytest tests -q -p no:cacheprovider -x --ignore=tests/test_data
+test-all: $(BIN)/veriswe  ## our suite + the full upstream mini-swe-agent suite
+	@$(BIN)/python -m pip install -q --disable-pip-version-check pytest-asyncio portkey-ai datasets 2>/dev/null || \
+		uv pip install -q --python $(BIN)/python pytest-asyncio portkey-ai datasets
+	@PATH="$(CURDIR)/$(BIN):$$PATH" $(BIN)/python -m pytest tests -q -p no:cacheprovider -W ignore::pytest.PytestConfigWarning \
+		--ignore=tests/test_data --ignore=tests/environments/extra
 
 demo: $(BIN)/veriswe
 	@rm -rf workspace/demo_calc && mkdir -p workspace && cp -R tests/veriswe/fixtures/calc workspace/demo_calc

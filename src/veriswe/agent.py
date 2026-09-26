@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,9 @@ from veriswe.guards import LoopDetector, check_command
 from veriswe.models import toolcall_history_to_text
 from veriswe.verify import VerificationResult, Verifier, detect_python
 from veriswe.workspace import Workspace
+
+
+EDIT_COMMAND = re.compile(r"\b(str_replace|undo_edit|sed\s+-i|patch\b|git\s+apply|tee\b)|>\s*[\w./-]+\.\w+")
 
 
 class VeriAgentConfig(AgentConfig):
@@ -189,6 +193,11 @@ class VeriAgent(DefaultAgent):
                     output = self._on_submit()  # raises Submitted if accepted
             if nudge := self.loop.record(command, output.get("output", ""), output.get("returncode")):
                 output = {**output, "output": (output.get("output") or "") + "\n\n" + nudge}
+            if EDIT_COMMAND.search(command):
+                try:  # live patch for the UI (edits only, to keep git calls rare)
+                    self.emit("patch", diff=self.ws.diff(), files=self.ws.changed_files())
+                except Exception:
+                    pass
             if dropped := message.get("extra", {}).get("dropped_actions"):
                 note = f"HARNESS NOTE: only the FIRST of your {dropped + 1} command blocks was executed. Send one command per reply."
                 output = {**output, "output": (output.get("output") or "") + "\n\n" + note}
