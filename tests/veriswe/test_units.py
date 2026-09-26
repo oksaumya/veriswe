@@ -340,3 +340,16 @@ def test_no_host_accepts_key_falls_back_to_openai(monkeypatch):
     _fake_hosts(monkeypatch, {})
     r = mc.resolve_model(env={"AI_API_KEY": "sk-abc"}, yaml_path=mc.config_dir / "model.yaml")
     assert r.provider == "openai"
+
+
+def test_known_provider_prefers_qwen_or_deepseek_from_its_list(monkeypatch):
+    import veriswe.model_config as mc
+
+    groq = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "whisper-large-v3"]
+    monkeypatch.setattr(mc, "list_provider_models", lambda *a, **k: groq)
+    r = mc.resolve_model(env={"AI_API_KEY": "gsk_abc"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.model_name == "groq/qwen/qwen3.8-27b"
+    assert r.model_kwargs["temperature"] == 0.7  # Qwen sampling applied
+    # no DeepSeek/Qwen on offer -> configured provider default
+    monkeypatch.setattr(mc, "list_provider_models", lambda *a, **k: ["openai/gpt-oss-120b"])
+    assert mc.resolve_model(env={"AI_API_KEY": "gsk_abc"}, yaml_path=mc.config_dir / "model.yaml").model_name == "groq/openai/gpt-oss-120b"

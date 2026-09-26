@@ -32,3 +32,5 @@ def _isolate(tmp_path, monkeypatch):
     # LiteLLM auto-loads ./.env on import; a developer's local model settings must not leak into tests.
     for var in ("AI_MODEL", "AI_BASE_URL", "AI_PROVIDER", "AI_TEXT_MODE", "AI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+    mc.__dict__.setdefault("_real_list_provider_models", mc.list_provider_models)
+    monkeypatch.setattr(mc, "list_provider_models", lambda *a, **k: [])

@@ -292,6 +292,12 @@ def resolve_model(
     if not model_name and base_url:
         model_name = pick_best_model(_list_models(base_url, api_key)) or _first_model_from_endpoint(base_url, api_key)
     from_default = False
+    if not model_name and discover:
+        # Prefer the prescribed DeepSeek/Qwen family among what this key can actually use.
+        listed = list_provider_models(provider, api_key, base_url)
+        best = pick_best_model(listed)
+        if best and re.search(r"deepseek|qwen", best, re.I):
+            model_name = best
     if not model_name:
         model_name = (cfg.get("provider_defaults") or {}).get(provider, "")
         from_default = True
