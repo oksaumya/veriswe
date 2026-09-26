@@ -56,6 +56,9 @@ class VeriAgentConfig(AgentConfig):
 EventHandler = Callable[[str, dict], None]
 
 
+LIMIT_REQUESTED_RE = re.compile(r"Limit\s*:?\s*(\d+).{0,40}?Requested\s*:?\s*(\d+)", re.I | re.S)
+
+
 def _is_overflow(e: Exception) -> bool:
     text = str(e).lower()
     return (
@@ -155,6 +158,7 @@ class VeriAgent(DefaultAgent):
         )
         chars_before = _chars(self.messages, raw=True)
         message = None
+        overflow_tries = 0
         while message is None:
             try:
                 sent = shrink_for_overflow(msgs, self._overflow_level) if self._overflow_level else msgs
@@ -165,16 +169,19 @@ class VeriAgent(DefaultAgent):
                 if not _is_overflow(e):
                     self._handle_model_failure(e)
                     raise
-                # Too big for the context window or the per-minute token budget: compact harder and retry.
+                # Too big for the context window or the per-request token budget.
+                # 1) If the provider says how big the budget is, first shrink the reserved OUTPUT to fit exactly
+                #    (providers such as Groq count max_tokens against the budget); 2) otherwise compact the history.
+                overflow_tries += 1
+                if overflow_tries > 8:
+                    self._finish_on_limit("ContextOverflow")
+                if self._fit_output_budget(e, sent):
+                    self.emit("compact", level=self._overflow_level, reason=f"output cap -> {self._max_tokens()} tokens")
+                    continue
                 if self._overflow_level >= 3:
                     self._finish_on_limit("ContextOverflow")
                 self._overflow_level += 1
-                if type(e).__name__ == "RequestTooLargeError":
-                    # Providers may count the max OUTPUT tokens against the budget too: cap them as well.
-                    kw = getattr(getattr(self.model, "config", None), "model_kwargs", None)
-                    if isinstance(kw, dict):
-                        kw["max_tokens"] = min(kw.get("max_tokens") or 10**9, {1: 8192, 2: 4096}.get(self._overflow_level, 2048))
-                self.emit("compact", level=self._overflow_level, reason=type(e).__name__)
+                self.emit("compact", level=self._overflow_level, reason=str(e)[:160])
         chars_sent = _chars(sent)
         self.context["chars_before"] += chars_before
         self.context["chars_sent"] += chars_sent
@@ -200,6 +207,32 @@ class VeriAgent(DefaultAgent):
             raw = m.group(1).lower()
             self.task_type = next((v for k, v in TASK_TYPES.items() if raw.startswith(k)), "other")
             self.emit("task_type", task_type=self.task_type)
+
+    def _model_kwargs(self) -> dict | None:
+        kw = getattr(getattr(self.model, "config", None), "model_kwargs", None)
+        return kw if isinstance(kw, dict) else None
+
+    def _max_tokens(self):
+        return (self._model_kwargs() or {}).get("max_tokens")
+
+    def _fit_output_budget(self, e: Exception, sent: list[dict]) -> bool:
+        """Parse 'Limit N, Requested M' and cap max_tokens so prompt + output fits. True if the cap was lowered."""
+        m = LIMIT_REQUESTED_RE.search(str(e))
+        kw = self._model_kwargs()
+        if not m or kw is None:
+            return False
+        limit, requested = int(m.group(1)), int(m.group(2))
+        prompt_est = _chars(sent) // 3 + 400  # conservative token estimate (+ tool schema/overhead)
+        current = kw.get("max_tokens")
+        if current:
+            target = current - (requested - limit) - 256
+        else:
+            target = limit - prompt_est - 256
+        target = min(target, limit - prompt_est - 256)
+        if target < 768 or (current and target >= current):
+            return False  # no room left in the output budget: the history itself must shrink
+        kw["max_tokens"] = int(target)
+        return True
 
     def _handle_model_failure(self, e: Exception) -> None:
         """API died mid-run (after retries): still verify + submit the best work so far."""

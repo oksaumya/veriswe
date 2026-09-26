@@ -187,7 +187,7 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs **106 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **633 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
+`make test` runs **107 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **633 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
 
 The suite covers:
 

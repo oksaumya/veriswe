@@ -249,3 +249,21 @@ def test_probe_request_too_large_is_not_a_tool_problem(monkeypatch):
     r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
     assert probe_action_mode(r)[0] == "toolcall"
     assert seen == [None, 512]
+
+
+def test_output_cap_is_fitted_to_the_providers_request_budget():
+    from types import SimpleNamespace as NS
+
+    from veriswe.agent import VeriAgent
+
+    agent = VeriAgent.__new__(VeriAgent)
+    agent.model = NS(config=NS(model_kwargs={"max_tokens": 8192}))
+    sent = [{"role": "user", "content": "x" * 6000}]  # ~2k tokens of prompt
+    err = Exception("Request too large on tokens per minute (TPM): Limit 8000, Requested 11483")
+    assert agent._fit_output_budget(err, sent)
+    cap = agent.model.config.model_kwargs["max_tokens"]
+    assert 768 <= cap <= 8000 - 2000 - 256  # prompt + reserved output now fit the 8000 budget
+    # no numbers in the error, or no room left -> caller must compact the history instead
+    assert not agent._fit_output_budget(Exception("context length exceeded"), sent)
+    agent.model.config.model_kwargs["max_tokens"] = 800
+    assert not agent._fit_output_budget(Exception("Limit 8000, Requested 9000"), [{"role": "user", "content": "x" * 24000}])
