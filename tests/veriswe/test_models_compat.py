@@ -185,3 +185,23 @@ def test_probe_survives_rate_limits(monkeypatch):
     r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
     assert probe_action_mode(r)[0] == "toolcall"
     assert calls["n"] == 2
+
+
+def test_salvage_tool_call_rejected_by_server_parser(monkeypatch):
+    """Groq/vLLM: 'tool_use_failed' with the raw generation attached -> run the command anyway."""
+    from veriswe.models import VeriToolcallModel, salvage_failed_generation
+
+    raw = "<tool_call>\n<function=bash>\n<parameter=command>\ncd /repo && ls -la src/ && echo \"---\"\n</parameter>\n</function>\n</tool_call>"
+    body = json.dumps({"error": {"message": "Failed to call a function.", "code": "tool_use_failed", "failed_generation": raw}})
+    err = litellm.exceptions.BadRequestError(message=f"GroqException - {body}", model="groq/qwen", llm_provider="groq")
+    assert salvage_failed_generation(err) == (raw, 'cd /repo && ls -la src/ && echo "---"')
+
+    m = VeriToolcallModel(model_name="groq/qwen/qwen3.8-27b", cost_tracking="ignore_errors")
+
+    def fail(*a, **k):
+        raise err
+
+    monkeypatch.setattr(litellm, "completion", fail)
+    msg = m.query([{"role": "user", "content": "hi"}])
+    assert msg["extra"]["actions"][0]["command"].startswith("cd /repo")
+    assert msg["role"] == "assistant" and "tool_calls" not in msg

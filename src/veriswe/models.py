@@ -219,6 +219,25 @@ def extract_leaked_command(content: str) -> str | None:
     return None
 
 
+_FAILED_GENERATION = re.compile(r'"failed_generation"\s*:\s*("(?:[^"\\]|\\.)*")', re.S)
+
+
+def salvage_failed_generation(e: Exception) -> tuple[str, str] | None:
+    """Some servers (Groq, vLLM, SGLang) reject a tool call their own parser can't read but return the raw text.
+
+    If that text holds a recognisable bash call, recover (raw_text, command) instead of wasting the turn.
+    """
+    m = _FAILED_GENERATION.search(str(e))
+    if not m:
+        return None
+    try:
+        raw = json.loads(m.group(1))
+    except ValueError:
+        return None
+    cmd = extract_leaked_command(raw)
+    return (raw, cmd) if cmd else None
+
+
 class VeriToolcallModel(_NoBlindRetryMixin, LitellmModel):
     def _parse_actions(self, response) -> list[dict]:
         msg = response.choices[0].message
@@ -243,6 +262,13 @@ class VeriToolcallModel(_NoBlindRetryMixin, LitellmModel):
         except litellm.exceptions.BadRequestError as e:
             if not is_tool_parse_error(e):
                 raise
+            if salvaged := salvage_failed_generation(e):
+                raw, cmd = salvaged
+                return {
+                    "role": "assistant",
+                    "content": raw,
+                    "extra": {"actions": [{"command": cmd, "salvaged_tool_call": True}], "cost": 0.0, "timestamp": time.time()},
+                }
             raise FormatError(
                 {
                     "role": "user",

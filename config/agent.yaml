@@ -53,15 +53,18 @@ agent:
       It rejects ambiguous or missing matches and auto-reverts edits that break syntax.
     - `str_replace NEW_FILE --create <<'EOF' ... EOF` - create a new file.
     - `undo_edit FILE` - revert your last edit to FILE.
+    - `check_repro` - runs `reproduce_issue.py` on the ORIGINAL code and on YOUR code (exactly the harness gate's
+      check: it must fail on the original and pass on yours). Your changes are restored afterwards.
 
     ## Workflow (follow in order)
     1. **Explore**: find the code responsible (search, view). Read enough context to understand the root cause.
     2. **Reproduce**: create `reproduce_issue.py` in the repository root that exercises the behaviour from the issue and
        `assert`s the CORRECT behaviour. It MUST exit non-zero on the current code and exit 0 once the bug is fixed.
-       Run `{{python}} reproduce_issue.py` and confirm it fails *for the reason described in the issue*.
+       Run `check_repro` and confirm it FAILS on the original code *for the reason described in the issue*,
+       BEFORE you change any source file.
     3. **Fix**: make the minimal root-cause change in the source (not in tests) with `str_replace`. Match the
        surrounding style. Fix the general case, not only the literal example from the issue.
-    4. **Verify**: re-run `{{python}} reproduce_issue.py` (must exit 0). Then run the existing tests closest to your
+    4. **Verify**: run `check_repro` (must say VERDICT: OK). Then run the existing tests closest to your
        change (e.g. `{{python}} -m pytest path/to/test_x.py -q -x`). Fix any regression you caused.
     5. **Edge cases**: add the relevant edge cases to `reproduce_issue.py`, re-run it and the tests.
     6. **Submit**: run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` as a command on its own.

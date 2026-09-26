@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""check_repro: run reproduce_issue.py on the ORIGINAL code and on your CURRENT code.
+
+This is exactly the check the harness gate performs on submit: the reproduction must FAIL (non-zero exit) on the
+original code and PASS (exit 0) on your fixed code. Your changes are restored afterwards.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from veriswe.verify import detect_python
+from veriswe.workspace import Workspace
+
+TAIL = 1200
+
+
+def run(py: str, script: Path, cwd: Path) -> tuple[int, str]:
+    try:
+        p = subprocess.run(
+            [py, str(script)], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=180
+        )
+        out = (p.stdout + p.stderr).strip()
+        return p.returncode, out if len(out) <= TAIL else "[...]\n" + out[-TAIL:]
+    except subprocess.TimeoutExpired:
+        return -9, "[timed out after 180s]"
+
+
+def main() -> int:
+    repo = Path(os.environ.get("VERISWE_REPO") or os.getcwd()).resolve()
+    base = os.environ.get("VERISWE_BASE_COMMIT", "")
+    if not base:
+        print("ERROR: check_repro only works inside a VeriSWE run.")
+        return 2
+    ws = Workspace(repo=repo, base_commit=base)
+    if not ws.repro_path.exists():
+        print(f"ERROR: {ws.repro_path.name} does not exist yet. Create it in the repository root first.")
+        return 1
+    py = detect_python(repo)
+    patch = ws.diff()
+    rc_now, out_now = run(py, ws.repro_path, repo)
+    if not patch.strip():
+        ok = rc_now != 0
+        print(f"No source changes yet. On the ORIGINAL code: exit {rc_now} -> "
+              + ("FAILS as it should (bug reproduced). Now fix the source." if ok
+                 else "PASSES: it does NOT reproduce the bug. Make it assert the correct behaviour from the issue."))
+        print(f"--- output ---\n{out_now}")
+        return 0 if ok else 1
+    ws.reverse(patch)
+    try:
+        rc_orig, out_orig = run(py, ws.repro_path, repo)
+    finally:
+        ws.apply(patch)
+    fails_before, passes_after = rc_orig != 0, rc_now == 0
+    print(f"ORIGINAL code: exit {rc_orig} -> " + ("FAILS (good: bug reproduced)" if fails_before else "PASSES (bad: does not reproduce the bug)"))
+    print(f"YOUR code:     exit {rc_now} -> " + ("PASSES (good: fixed)" if passes_after else "FAILS (bad: not fixed yet)"))
+    if fails_before and passes_after:
+        print("VERDICT: OK - this is what the harness gate requires. Also run the related existing tests.")
+    elif not fails_before:
+        print("VERDICT: strengthen reproduce_issue.py so it asserts the exact behaviour from the issue "
+              "(it must fail on the original code).")
+    else:
+        print("VERDICT: the fix is incomplete - see the output on your code below.")
+    print(f"--- output on ORIGINAL code ---\n{out_orig}\n--- output on YOUR code ---\n{out_now}")
+    return 0 if (fails_before and passes_after) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

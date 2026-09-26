@@ -242,3 +242,15 @@ def test_regression_tests_run_even_if_project_python_lacks_pytest(calc_repo, tmp
     tests = next(c for c in [d["result"] for k, d in events if k == "verify"][-1].checks if c.name == "tests")
     assert tests.status == "pass", tests.summary
     assert res.verified
+
+
+def test_check_repro_tool_matches_the_gate(calc_repo):
+    weak = "cat > reproduce_issue.py <<'EOF'\nfrom calc.stats import median\nassert median([3, 1, 2]) == 2\nEOF"
+    model = script(REPRO, "check_repro", GOOD_FIX, "check_repro", weak, "check_repro", REPRO, SUBMIT)
+    res, events = run(calc_repo, model)
+    obs = [d["output"] for k, d in events if k == "observation"]
+    assert "FAILS as it should" in obs[1]  # before any fix
+    assert "VERDICT: OK" in obs[3]  # after the fix
+    assert "PASSES (bad: does not reproduce" in obs[5]  # weak reproduction detected
+    assert "(data[mid - 1] + data[mid]) / 2" in res.patch  # the fix survived all the undo/redo
+    assert res.verified

@@ -108,7 +108,12 @@ def run_task(
     env = VeriEnvironment(
         cwd=str(repo),
         timeout=env_cfg.get("timeout", 180),
-        env={**env_cfg.get("env", {}), "VERISWE_SCRATCH": str(ws.scratch)},
+        env={
+            **env_cfg.get("env", {}),
+            "VERISWE_SCRATCH": str(ws.scratch),
+            "VERISWE_REPO": str(ws.repo),
+            "VERISWE_BASE_COMMIT": ws.base_commit,
+        },
     )
     a = dict(agent_cfg["agent"])
     for k in ("format_error_template_toolcall", "format_error_template_text", "observation_template"):
