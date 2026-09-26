@@ -211,3 +211,21 @@ def test_salvage_tool_call_rejected_by_server_parser(monkeypatch):
     msg = m.query([{"role": "user", "content": "hi"}])
     assert msg["extra"]["actions"][0]["command"].startswith("cd /repo")
     assert msg["role"] == "assistant" and "tool_calls" not in msg
+
+
+def test_probe_is_not_fooled_by_one_flaky_tool_parse(monkeypatch):
+    from veriswe.model_config import ResolvedModel, probe_action_mode
+
+    calls = {"n": 0}
+    ok = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[object()], content=""))])
+    flaky = litellm.exceptions.BadRequestError(message='{"error":{"message":"Failed to call a function.","code":"tool_use_failed"}}', model="m", llm_provider="groq")
+
+    def completion(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise flaky
+        return ok
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    r = ResolvedModel(model_name="groq/qwen/qwen3.8-27b", provider="groq", action_mode="auto", model_kwargs={"api_key": "k"})
+    assert probe_action_mode(r)[0] == "toolcall"
