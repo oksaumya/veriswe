@@ -205,3 +205,15 @@ def test_retry_after_parsing():
     assert retry_after_seconds(Exception("Please try again in 1m2.5s")) == 62.5
     assert retry_after_seconds(Exception("try again in 250ms")) == 0.25
     assert retry_after_seconds(Exception("no hint")) is None
+
+
+def test_select_tests_via_indirect_package_import(tmp_path):
+    from veriswe.verify import Verifier
+
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "_core.py").write_text("X = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "__init__.py").write_text("import pkg as lib\n")
+    (tmp_path / "tests" / "test_things.py").write_text("from . import lib\n")
+    ws = Workspace(repo=tmp_path, base_commit="HEAD")
+    assert Verifier(ws).select_python_tests(["src/pkg/_core.py"]) == ["tests/test_things.py"]

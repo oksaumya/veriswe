@@ -242,6 +242,14 @@ class Verifier:
                     continue
                 if any(p.search(txt) for p in pats):
                     add(t)
+            # 5) indirect imports: a test package's __init__/conftest/helper imports the code (e.g. `from . import lib`)
+            if not chosen and pats:
+                for d in sorted({t.parent for t in all_tests}, key=lambda p: len(p.parts)):
+                    helpers = [h for h in d.glob("*.py") if not (h.name.startswith("test_") or h.name.endswith("_test.py"))]
+                    if any(p.search(h.read_text(errors="ignore")) for h in helpers for p in pats):
+                        for t in sorted(x for x in all_tests if x.parent == d):
+                            if len(chosen) < MAX_TEST_FILES:
+                                add(t)
         return chosen[:MAX_TEST_FILES]
 
     def _pytest(self, python: str, files: list[str], tag: str) -> tuple[dict[str, str], str, int]:
