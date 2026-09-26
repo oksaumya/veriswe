@@ -141,7 +141,7 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs 49 offline tests in under 30 seconds, with no network or API key:
+`make test` runs 60 offline tests in under 30 seconds, with no network or API key:
 
 - **Unit tests:** provider detection, config and env overrides, a no-secrets-in-config check, guards, the loop detector, masking, intake, and workspace diffs and their round trip.
 - **Tool tests:** `str_replace` uniqueness, lint revert and undo; `view`; `search`.

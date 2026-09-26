@@ -228,3 +228,17 @@ def test_oversized_request_compacts_instead_of_dying(calc_repo):
     res, events = run(calc_repo, model)
     assert [d["level"] for k, d in events if k == "compact"] == [1, 2]
     assert res.verified
+
+
+def test_regression_tests_run_even_if_project_python_lacks_pytest(calc_repo, tmp_path, monkeypatch):
+    # Project interpreter = a Python venv without pytest -> verifier must fall back and still run the tests.
+    import subprocess
+    import sys
+
+    venv = tmp_path / "nopytest"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    monkeypatch.setenv("VERISWE_PYTHON", str(venv / "bin" / "python"))
+    res, events = run(calc_repo, script(REPRO, GOOD_FIX, SUBMIT))
+    tests = next(c for c in [d["result"] for k, d in events if k == "verify"][-1].checks if c.name == "tests")
+    assert tests.status == "pass", tests.summary
+    assert res.verified

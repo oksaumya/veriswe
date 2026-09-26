@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
@@ -257,9 +258,10 @@ class Verifier:
         xml = self.ws.scratch / f"junit_{tag}.xml"
         xml.unlink(missing_ok=True)
         base = [python, "-m", "pytest", "-q", "-rf", "--no-header", "-p", "no:cacheprovider", f"--junitxml={xml}"]
-        rc, out, _ = _run(base + files, self.repo, self.test_timeout)
+        env = getattr(self, "_test_env", None)
+        rc, out, _ = _run(base + files, self.repo, self.test_timeout, env)
         if rc == 4 and "unrecognized arguments" in out:  # repo addopts need plugins we lack
-            rc, out, _ = _run(base + ["-o", "addopts="] + files, self.repo, self.test_timeout)
+            rc, out, _ = _run(base + ["-o", "addopts="] + files, self.repo, self.test_timeout, env)
         results: dict[str, str] = {}
         if xml.exists():
             try:
@@ -274,12 +276,16 @@ class Verifier:
     def check_tests(self, patch: str, changed: list[str], python: str) -> Check:
         py_changed = [c for c in changed if c.endswith(".py")]
         if py_changed:
-            rc, _, _ = _run([python, "-c", "import pytest"], self.repo, 60)
-            if rc != 0:
-                return Check("tests", "skip", "pytest not available in the project interpreter")
             files = self.select_python_tests(changed)
             if not files:
                 return Check("tests", "skip", "no related test files found")
+            rc, _, _ = _run([python, "-c", "import pytest"], self.repo, 60)
+            if rc != 0:
+                # The project's interpreter lacks pytest: fall back to VeriSWE's own interpreter (always has pytest)
+                # with the repo importable. Before/after runs use the same interpreter, so the comparison stays fair.
+                python = sys.executable
+                src_paths = [str(self.repo / d) for d in ("src", "lib") if (self.repo / d).is_dir()]
+                self._test_env = {"PYTHONPATH": os.pathsep.join([str(self.repo), *src_paths])}
             after, out_a, rc_a = self._pytest(python, files, "after")
             failed_after = {t for t, o in after.items() if o == "failed"}
             n_pass = sum(1 for o in after.values() if o == "passed")
