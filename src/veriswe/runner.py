@@ -92,7 +92,13 @@ def run_task(
     on_event("issue", {"title": issue.title, "url": issue.url, "body": issue.body[:2000]})
     repo = resolve_repo(repo_spec, issue, WORKSPACE_DIR)
     ws = Workspace.prepare(repo)
-    on_event("workspace", {"repo": str(repo), "base": ws.base_commit})
+    try:
+        from veriswe.workspace import git
+
+        branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    except Exception:
+        branch = ""
+    on_event("workspace", {"repo": str(repo), "base": ws.base_commit, "branch": branch})
 
     text_model_factory = None
     if model is None:

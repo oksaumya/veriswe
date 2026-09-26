@@ -37,7 +37,13 @@ def test_tui_intake_and_run(calc_repo, monkeypatch, tmp_path):
                     break
             assert isinstance(app.screen, RunScreen)
             app.save_screenshot(filename="tui_done.svg", path=str(tmp_path))
+            await pilot.press("p")  # PATCH view
+            await pilot.pause(0.3)
             patch_lines = "".join(str(line.text) for line in app.screen.query_one("#patchlog").lines)
+            for key in "iavlhr":  # every view opens without errors
+                await pilot.press(key)
+                await pilot.pause(0.05)
+            assert app.active_view == "run"
             return app, patch_lines
 
     app, patch_text = asyncio.run(drive())

@@ -45,32 +45,24 @@ When stdin is not a terminal, VeriSWE runs headless automatically.
 
 ### The terminal UI
 
-`make run` opens a live dashboard:
+`make run` opens a mission-control dashboard:
 
-- **Intake screen.** Paste an issue URL or text, and optionally a repository. The screen confirms whether `AI_API_KEY` is set and which host it belongs to, without ever showing the key. Input is validated before a run starts.
-- **Phase pipeline.** A bar across the top shows `Setup → Explore → Reproduce → Fix → Verify → Done`, with the current phase animated. It moves back to *Fix* when the verification gate rejects a submission.
-- **Tabs:**
-  - `a` **Activity:** a timeline of step cards with the model's reasoning, each command with syntax highlighting, and a badge on each result.
-  - `p` **Patch:** the diff, updated live after every edit.
-  - `i` **Issue:** the issue, rendered.
-- **Sidebar:**
-  - **Result banner:** *VERIFIED FIX*, *UNVERIFIED PATCH* or *NO PATCH*.
-  - **Run panel:** status spinner, model, action mode, a steps/limit progress bar, tokens with cache-hit %, cost, and elapsed time.
-  - **Verification checklist:** ✓ ✗ ! – for each check, with the round number and the gate's verdict.
-  - **Changed files.**
-- **Keys:** `f` toggles auto-follow and `Ctrl+Q` quits.
+- **Top bar:** the model, the provider and the run ID.
+- **Phase chevrons:** `SETUP → EXPLORE → REPRODUCE → FIX → VERIFY → DONE`, with the current phase animated. The bar drops back to FIX when the gate rejects a submission.
+- **Left navigation:** `[r]un · [i]ssue · [a]gent · [p]atch · [v]erify · [l]ogs · [h]elp`, plus RUN INFO (run ID, branch, workspace, start time, elapsed time, steps, task type).
+- **Run view, centre:**
+  - **Issue Context:** the issue title, URL and excerpt.
+  - **Agent Timeline:** timestamped milestones (explored, reproduced the failure, applied a patch, ran tests, gate rejected, reverted, gate accepted), not raw commands.
+  - **Agent Decision:** the latest reasoning and a patch excerpt with +/- counts.
+- **Run view, right:**
+  - **Verification Gate:** numbered checks (diff, syntax, repro_before, repro_after, tests, evidence), each marked Completed, In progress, Failed or Pending, with the current round.
+  - **Patch Status:** a harness test-results grid (passed, failed, skipped, total) and a **Risk / Safety** rating (LOW, MEDIUM or HIGH).
+  - **Agent Claim vs Verifier Evidence:** what the model said, next to what the harness actually proved.
+  - A final VERIFIED or UNVERIFIED bar.
+- **Full views:** the complete agent activity, the live diff, verification details with logs, and the raw event log.
+- **Footer:** hotkeys, status, tokens (with cache %), time and cost.
 
-Each run writes to `runs/<timestamp>-<repo>/`:
-
-| File | Contents |
-|---|---|
-| `patch.diff` | Final patch against the starting commit. It is also left applied in the repository. |
-| `report.md` | Status (VERIFIED/UNVERIFIED), the AGENT EXECUTION box, the evidence table, verification history, and the patch. |
-| `telemetry.jsonl` | Every harness event (model calls, tool calls, results, failures, recoveries, verification rounds), with secrets redacted. |
-| `telemetry_summary.json` | Counts of calls, failures, recovery events and verification rounds, context chars before/sent/reduced, and tokens. |
-| `result.json` | Machine-readable summary. |
-| `trajectory.json` | Full agent trajectory with every message, command and output. Secrets are redacted. |
-| `evidence/` | The reproduction script and JUnit XML files from the harness test runs. |
+The intake screen confirms whether `AI_API_KEY` is set and which host it belongs to, without ever showing the key, and validates input before a run starts.
 
 ## Model configuration
 

@@ -306,7 +306,15 @@ class Verifier:
             preexisting = sorted(t for t in failed_after if before.get(t) == "failed")
             fail_to_pass = sorted(t for t, o in after.items() if o == "passed" and before.get(t) != "passed")
             pass_both = sum(1 for t, o in after.items() if o == "passed" and before.get(t) == "passed")
-            data = {"files": files, "passed": n_pass, "pass_both": pass_both, "fail_to_pass": fail_to_pass}
+            data = {
+                "files": files,
+                "passed": n_pass,
+                "failed": len(failed_after),
+                "skipped": sum(1 for o in after.values() if o == "skipped"),
+                "total": len(after),
+                "pass_both": pass_both,
+                "fail_to_pass": fail_to_pass,
+            }
             if new_failures:
                 return Check(
                     "tests",
