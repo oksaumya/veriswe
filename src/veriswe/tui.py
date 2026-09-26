@@ -7,6 +7,7 @@ import re
 import time
 from datetime import datetime
 
+from rich import box
 from rich.console import Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -105,9 +106,9 @@ def first_line(text: str, limit: int = 90) -> str:
     return ""
 
 
-def section(title: str, body, *, color: str = BLUE, subtitle: str = "", edge: str = EDGE) -> Panel:
-    return Panel(body, title=f"[b {color}]{title}[/]", title_align="left", subtitle=subtitle or None,
-                 subtitle_align="right", border_style=edge, padding=(0, 1), style=f"on {PANEL}")  # fmt: skip
+def section(title: str, body, *, color: str = CYAN) -> Group:
+    """A column section: bold header, thin rule, body (the column itself carries the border)."""
+    return Group(Text(title, style=f"bold {color}"), Rule(style=DIM_EDGE), body)
 
 
 # ====================================================================== intake
@@ -241,17 +242,18 @@ class VeriApp(App):
     CSS = f"""
     Screen {{ background: {BG}; }}
     #topbar {{ height: 3; padding: 0 1; border: round {EDGE}; background: {PANEL}; content-align: left middle; }}
-    #phases {{ height: 3; }}
+    #phases {{ height: 3; margin: 0 1; }}
     #footerbar {{ height: 3; padding: 0 1; border: round {EDGE}; background: {PANEL}; content-align: left middle; }}
     #body {{ height: 1fr; }}
-    #nav {{ width: 30; border: round {EDGE}; background: {PANEL}; padding: 0 1; }}
+    #nav {{ width: 30; border: round {EDGE}; background: {PANEL}; padding: 1 1; }}
     #navlist {{ height: auto; }}
     #runinfo {{ height: auto; margin-top: 1; }}
     #views {{ width: 1fr; }}
     #run {{ height: 1fr; }}
-    #center {{ width: 1fr; margin: 0 1; scrollbar-size: 1 1; }}
-    #right {{ width: 1fr; scrollbar-size: 1 1; }}
+    #center {{ width: 11fr; margin: 0 1; border: round {EDGE}; background: {PANEL}; padding: 0 1; scrollbar-size: 1 1; }}
+    #right {{ width: 10fr; border: round {EDGE}; background: {PANEL}; padding: 0 1; scrollbar-size: 1 1; }}
     #issuectx, #timeline, #decision, #gate, #patchstatus, #statusbar {{ height: auto; }}
+    #timeline, #decision {{ margin-top: 1; }}
     #claims {{ height: auto; }}
     #claim, #evidence {{ width: 1fr; height: auto; }}
     #issue, #agent, #patchlog, #verifylog, #eventlog, #help {{ border: round {EDGE}; background: {PANEL}; margin-left: 1; padding: 0 1; }}
@@ -536,49 +538,60 @@ class VeriApp(App):
         grid.add_column(ratio=1)
         grid.add_column(justify="right")
         grid.add_row(
-            Text.from_markup(f"[b {BLUE}]VeriSWE v{__version__}[/] [{WHITE}]– Verification-First Coding Agent[/]"),
-            Text.from_markup(f"[{GREY}]Model:[/] {escape(str(self.stats['model']))}  [{GREY}]│  Provider:[/] "
-                             f"{escape(self.info['provider'])}  [{GREY}]│  Run:[/] {escape(self.info['run_id'])}"),  # fmt: skip
+            Text.from_markup(f"[b {CYAN}]VeriSWE v{__version__}[/] [b {CYAN}]– Verification-First Coding Agent[/]"),
+            Text.from_markup(f"[{WHITE}]Model: {escape(str(self.stats['model']))}  │  Provider: "
+                             f"{escape(self.info['provider'])}  │  Run: {escape(self.info['run_id'])}[/]"),  # fmt: skip
         )
         self._upd("#topbar", grid)
 
     def _render_phases(self) -> None:
+        """Three-line chevron bar:  ────────╲  /  LABEL ✓  ❯  /  ────────╱"""
+        width = max(60, (self.size.width or 160) - 2)
+        seg = width // len(PHASES)
         cur = PHASES.index(self.phase)
-        grid = Table.grid(expand=True, padding=0)
-        for _ in PHASES:
-            grid.add_column(ratio=1)
-        cells = []
+        top, mid, bot = Text(), Text(), Text()
         for i, name in enumerate(PHASES):
-            label = name.upper()
-            if i < cur or (name == "Done" and i == cur):
-                txt, border, bg = Text(f"{label}  ✓", style=f"bold {GREEN}", justify="center"), GREEN, PANEL
-            elif i == cur:
+            done = i < cur or (name == "Done" and i == cur)
+            active = i == cur and not done
+            if done:
+                fg, bg, label = GREEN, BG, f"{name.upper()}  ✓"
+            elif active:
                 dot = SPINNER[self._spin] if self.stats.get("busy") else "●"
-                txt, border, bg = Text(f"{label}  {dot}", style="bold white", justify="center"), BLUE, EDGE
+                fg, bg, label = "#ffffff", EDGE, f"{name.upper()}  {dot}"
             else:
-                txt, border, bg = Text(f"{label}  ○", style=GREY, justify="center"), DIM_EDGE, PANEL
-            cells.append(Panel(txt, border_style=border, style=f"on {bg}", padding=0))
-        grid.add_row(*cells)
-        self._upd("#phases", grid)
+                fg, bg, label = GREY, BG, f"{name.upper()}  ○"
+            edge = BLUE if active else (GREEN if done else DIM_EDGE)
+            body = seg - 2
+            top.append("─" * body, style=f"{edge} on {bg}")
+            top.append("╲ ", style=edge)
+            mid.append(label.center(body), style=f"bold {fg} on {bg}")
+            mid.append(" ❯", style=f"bold {edge}")
+            bot.append("─" * body, style=f"{edge} on {bg}")
+            bot.append("╱ ", style=edge)
+        self._upd("#phases", Group(top, mid, bot))
 
     def _render_nav(self) -> None:
-        rows = []
+        nav = Table.grid(expand=True, padding=(0, 0))
+        nav.add_column(no_wrap=True)
+        nav.add_column(ratio=1, no_wrap=True)
+        nav.add_column(justify="right", no_wrap=True)
         for vid, icon, label, key in NAV:
             active = vid == self.active_view
-            t = Text(f" {icon}  {label:<11}", style=f"bold white on {EDGE}" if active else WHITE)
-            t.append(f"[{key}] ", style=f"bold white on {EDGE}" if active else GREY)
-            rows += [t, Text("")]
-        self._upd("#navlist", Group(*rows))
+            style = f"bold {CYAN} on #12305a" if active else WHITE
+            bar = Text("▌", style=f"{CYAN} on #12305a") if active else Text(" ")
+            nav.add_row(Text.assemble(bar, Text(f" {icon}  ", style=style)), Text(label, style=style),
+                        Text(f"[{key}] ", style=style if active else GREY))  # fmt: skip
+            nav.add_row("", "", "")
+        self._upd("#navlist", nav)
         info = Table.grid(padding=(0, 1))
-        info.add_column(style=GREY, no_wrap=True)
-        info.add_column(overflow="ellipsis", no_wrap=True, max_width=16)
-        info.add_row("Run ID", escape(self.info["run_id"]))
-        info.add_row("Branch", escape(self.info["branch"]))
-        info.add_row("Workspace", escape(os.path.basename(self.info["repo"]) or self.info["repo"]))
-        info.add_row("Started", self.info["started"])
-        info.add_row("Elapsed", fmt_duration(time.time() - self._t0))
-        info.add_row("Steps", f"{self.stats['step']} / {self.stats.get('step_limit') or '-'}")
-        info.add_row("Task", escape(self.stats.get("task_type") or "-"))
+        info.add_column(style=WHITE, no_wrap=True)
+        info.add_column(overflow="ellipsis", no_wrap=True, max_width=15)
+        for label, value in (("Run ID", self.info["run_id"]), ("Branch", self.info["branch"]),
+                             ("Workspace", os.path.basename(self.info["repo"]) or self.info["repo"]),
+                             ("Started", self.info["started"]), ("Elapsed", fmt_duration(time.time() - self._t0)),
+                             ("Steps", f"{self.stats['step']} / {self.stats.get('step_limit') or '-'}"),
+                             ("Task", self.stats.get("task_type") or "-")):  # fmt: skip
+            info.add_row(f"{label:<9}:", escape(str(value)))
         self._upd("#runinfo", Group(Rule(style=DIM_EDGE), Text("RUN INFO", style=f"bold {WHITE}"), info))
 
     def _render_issue(self) -> None:
@@ -588,143 +601,171 @@ class VeriApp(App):
             lines = body.splitlines()
             title = (lines[0] if lines else "waiting for the task...").lstrip("# ").strip()
             body = "\n".join(lines[1:]).strip()
-        parts = [Text.from_markup(f"[b {WHITE}]◆ {escape(title[:90])}[/]")]
+        prose, code = split_code(body)
+        parts = [Text.assemble(("◆ ", CYAN), (title[:90], f"bold {CYAN}"))]
         if self.issue["url"]:
-            parts.append(Text(self.issue["url"], style=f"underline {BLUE}"))
+            parts.append(Text.assemble((self.issue["url"], f"underline {BLUE}"), ("  ↗", BLUE)))
         if self.stats.get("task_type"):
-            parts.append(Text.from_markup(f"[{GREY}]Task type :[/] [b {CYAN}]{escape(self.stats['task_type'])}[/]"))
-        if body:
-            excerpt = "\n".join(body.splitlines()[:7])
-            parts.append(Panel(Text(excerpt[:700], style=WHITE), border_style=DIM_EDGE, padding=(0, 1)))
+            parts.append(Text.assemble(("Task type : ", CYAN), (self.stats["task_type"], WHITE)))
+        if prose:
+            parts.append(Text("Description:", style=CYAN))
+            parts.append(Text("\n".join(prose.splitlines()[:3])[:320], style=WHITE))
+        if code:
+            parts.append(Panel(Text("\n".join(code.splitlines()[:4])[:500], style=WHITE), border_style=DIM_EDGE, padding=(0, 1),
+                               style="on #0a1424"))  # fmt: skip
         self._upd("#issuectx", section("ISSUE CONTEXT", Group(*parts)))
 
     def _render_timeline(self) -> None:
-        items = self.timeline[-9:]
+        items = self.timeline[-4:] if self._compact() else self.timeline[-6:]
         body = Table.grid(padding=(0, 1))
         body.add_column(no_wrap=True)
-        body.add_column(no_wrap=True, style=GREY)
+        body.add_column(no_wrap=True, style=CYAN)
         body.add_column()
         for n, e in enumerate(items):
             last = n == len(items) - 1
-            dot = SPINNER[self._spin] if (last and self.stats.get("busy")) else "●"
-            body.add_row(Text(dot, style=e["color"]), e["time"], Text(e["title"], style=f"bold {WHITE}"))
-            if e["detail"]:
-                body.add_row(Text("│" if not last else " ", style=DIM_EDGE), "", Text(f"→ {e['detail']}", style=f"italic {GREY}"))
+            live = last and self.stats.get("busy")
+            dot = Text(SPINNER[self._spin] if live else "●", style=BLUE if live else e["color"])
+            body.add_row(dot, e["time"], Text(e["title"], style=WHITE))
+            body.add_row(Text("│" if not last else " ", style=GREEN if not last else DIM_EDGE), "",
+                         Text(f"→ {e['detail']}" if e["detail"] else "", style=f"italic {GREY}"))  # fmt: skip
         self._upd("#timeline", section("AGENT TIMELINE", body if items else Text("starting...", style=GREY)))
 
     def _render_decision(self) -> None:
         head = Table.grid(padding=(0, 2))
         head.add_column(no_wrap=True)
         head.add_column()
-        thought = " ".join(self.last_thought.split())[:320] or "waiting for the agent..."
+        thought = " ".join(self.last_thought.split())[:300] or "waiting for the agent..."
         head.add_row(Text("◉ AGENT", style=f"bold {CYAN}"), Text(thought, style=WHITE))
-        parts = [head]
+        inner = [head]
         if self.diff.strip():
-            lines = [ln for ln in self.diff.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))][:8]
-            foot = "  ".join(f"{f} +{a} -{r}" for f, (a, r) in list(diff_stats(self.diff).items())[:3])
-            parts.append(Panel(Group(Syntax("\n".join(lines), "diff", theme="monokai", background_color="default"),
-                                     Text(foot, style=GREY, justify="right")),  # fmt: skip
-                               title=f"[{GREY}]# Applied patch (excerpt)[/]", title_align="left", border_style=DIM_EDGE))
-        self._upd("#decision", section("AGENT DECISION", Group(*parts)))
+            lines = [ln for ln in self.diff.splitlines() if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))][:6]
+            foot = "  ".join(f"{os.path.basename(f)} +{a} -{r}" for f, (a, r) in list(diff_stats(self.diff).items())[:3])
+            code = Group(Text("# Applied patch (excerpt)", style=GREY),
+                         Syntax("\n".join(lines), "diff", theme="monokai", background_color="default"),
+                         Text(foot, style=WHITE, justify="right"))  # fmt: skip
+            inner.append(Panel(code, border_style=DIM_EDGE, padding=(0, 1), style="on #0a1424"))
+        self._upd("#decision", section("AGENT DECISION", Panel(Group(*inner), border_style=EDGE, padding=(0, 1))))
 
     def _render_gate(self) -> None:
-        rows = Table.grid(padding=(0, 1), expand=True)
-        rows.add_column(no_wrap=True)
-        rows.add_column(ratio=1)
-        rows.add_column(no_wrap=True, justify="right")
+        head = Table.grid(expand=True)
+        head.add_column(ratio=1)
+        head.add_column(justify="right")
+        chip = Text(f" CURRENT ROUND: {self.verify_round or '-'} ", style=f"bold {CYAN} on #12305a")
+        head.add_row(Text("⛨ VERIFICATION GATE", style=f"bold {CYAN}"), chip)
+        compact = self._compact()
+        intro = Text("Independent of the agent: the agent proposes, the verifier decides." if compact else
+                     "Verification is independent of the agent. The agent can propose/apply a patch, "
+                     "but the verifier decides whether to accept it.", style=WHITE)  # fmt: skip
+        boxes = []
         names = GATE_ORDER + (["verifier"] if "verifier" in self.check_map else [])
         for n, name in enumerate(names, 1):
             c = self.check_map.get(name)
             if c:
                 icon, color = CHECK_ICON.get(c.status, ("?", WHITE))
                 state = {"pass": "Completed", "fail": "Failed", "warn": "Warning", "skip": "Skipped"}.get(c.status, c.status)
-                detail, frac = c.summary, "1/1" if c.status == "pass" else "0/1"
+                detail, frac, edge = c.summary, "1/1" if c.status == "pass" else "0/1", color
             elif self.verifying:
-                icon, color, state, detail, frac = SPINNER[self._spin], BLUE, "In progress", GATE_HELP.get(name, ""), "0/1"
+                icon, color, state, detail, frac, edge = SPINNER[self._spin], BLUE, "In Progress", GATE_HELP.get(name, ""), "0/1", BLUE
             else:
-                icon, color, state, detail, frac = "○", GREY, "Pending", GATE_HELP.get(name, ""), "0/1"
-            rows.add_row(Text(f"{n}. {name.upper()}", style=f"bold {WHITE}"), Text(f"{icon} {state}", style=color), Text(frac, style=GREY))
-            rows.add_row("", Text(detail[:150], style=GREY), "")
-        intro = Text("Verification is independent of the agent. The agent can propose a patch, "
-                     "but the verifier decides whether to accept it.", style=WHITE)  # fmt: skip
-        rnd = f"[b {CYAN}] CURRENT ROUND: {self.verify_round or '-'} [/]"
-        self._upd("#gate", section("⛨ VERIFICATION GATE", Group(intro, Text(""), rows), subtitle=rnd))
+                icon, color, state, detail, frac, edge = "○", GREY, "Pending", GATE_HELP.get(name, ""), "0/1", DIM_EDGE
+            row = Table.grid(expand=True, padding=(0, 1))
+            row.add_column(no_wrap=True, min_width=16)
+            row.add_column(ratio=1)
+            row.add_column(justify="right", no_wrap=True)
+            row.add_row(Text(f"{n}. {name.upper()}", style=f"bold {WHITE}"), Text(f"{icon}  {state}", style=color), Text(frac, style=color))
+            if compact:  # short terminal: two plain lines per check instead of a bordered box
+                boxes.append(Group(row, Text("   " + detail, style=GREY, no_wrap=True, overflow="ellipsis")))
+                continue
+            boxes.append(Panel(Group(row, Text(detail, style=WHITE, no_wrap=True, overflow="ellipsis")), border_style=edge, padding=(0, 1),
+                               style="on #12305a" if (self.verifying and not c) else f"on {PANEL}"))  # fmt: skip
+        self._upd("#gate", Group(head, Rule(style=DIM_EDGE), intro, *boxes))
 
     def _render_patch_status(self) -> None:
         final = self.result.verified if self.result is not None else None
         if final is True or (final is None and self.verify_passed):
-            badge, color = f"[b black on {GREEN}] VERIFIED [/]", GREEN
+            badge, color = "VERIFIED", GREEN
         elif final is False:
-            badge, color = f"[b white on {RED}] UNVERIFIED [/]", RED
+            badge, color = "UNVERIFIED", RED
         elif self.verify_passed is False and not self.verifying:
-            badge, color = f"[b white on {RED}] REJECTED · ROUND {self.verify_round} [/]", RED
+            badge, color = f"REJECTED · ROUND {self.verify_round}", RED
         elif self.diff.strip():
-            badge, color = f"[b black on {AMBER}] PENDING [/]", AMBER
+            badge, color = "PENDING", AMBER
         else:
-            badge, color = f"[{GREY}] NO PATCH YET [/]", GREY
+            badge, color = "NO PATCH YET", GREY
+        head = Table.grid(expand=True)
+        head.add_column(ratio=1)
+        head.add_column(justify="right")
+        head.add_row(Text("PATCH STATUS", style=f"bold {color}"), Text(f" {badge} ", style=f"bold {BG} on {color}" if color != GREY else GREY))
         tests = self.check_map.get("tests")
         data = tests.data if tests is not None else {}
-        grid = Table(expand=True, box=None, show_header=True, padding=(0, 1))
+        grid = Table(expand=True, box=box.Box("    \n  ┆ \n    \n  ┆ \n    \n    \n    \n    \n"), show_edge=False,
+                     show_header=True, padding=(0, 1), border_style=DIM_EDGE, header_style="bold")  # fmt: skip
         for label, c in (("Passed", GREEN), ("Failed", RED), ("Skipped", AMBER), ("Total", WHITE)):
-            grid.add_column(Text(label, style=f"bold {c}"))
-        if data.get("total") is not None:
-            grid.add_row(*(Text(str(data.get(k, 0)), style=f"bold {c}") for k, c in
-                           (("passed", GREEN), ("failed", RED), ("skipped", AMBER), ("total", WHITE))))  # fmt: skip
-        else:
-            grid.add_row(*(Text("-", style=GREY) for _ in range(4)))
+            grid.add_column(Text(label, style=c), style="bold")
+        values = [str(data.get(k, 0)) for k in ("passed", "failed", "skipped", "total")] if data.get("total") is not None else ["-"] * 4
+        grid.add_row(*(Text(v, style=f"bold {c}") for v, c in zip(values, (GREEN, RED, AMBER, WHITE), strict=True)))
+        results = Panel(Group(Text.assemble(("Test Results ", f"bold {CYAN}"), ("(harness run)", WHITE)), grid),
+                        border_style=EDGE, padding=(0, 1))  # fmt: skip
         risk, rcolor, why = self._risk()
         risk_row = Table.grid(expand=True)
         risk_row.add_column(ratio=1)
         risk_row.add_column(justify="right", no_wrap=True)
-        risk_row.add_row(Group(Text("⚠ RISK / SAFETY", style=f"bold {rcolor}"), Text(why, style=GREY)), Text(risk, style=f"bold {rcolor}"))
-        body = Group(
-            Panel(grid, title=f"[{BLUE}]Test results[/] [{GREY}](harness run)[/]", title_align="left", border_style=DIM_EDGE),
-            Panel(risk_row, border_style=rcolor),
-        )
-        self._upd("#patchstatus", Panel(body, title=f"[b {color}]PATCH STATUS[/]", title_align="left", subtitle=badge,
-                                        subtitle_align="right", border_style=color, style=f"on {PANEL}"))  # fmt: skip
+        risk_row.add_row(Group(Text("⚠  RISK / SAFETY", style=f"bold {rcolor}"), Text(why, style=WHITE)),
+                         Text(f"⚠  {risk}", style=f"bold {rcolor}"))  # fmt: skip
+        body = Group(head, results, Panel(risk_row, border_style=rcolor, padding=(0, 1)))
+        self._upd("#patchstatus", Panel(body, border_style=color, padding=(0, 1), style=f"on {PANEL}"))
         if final is None:
             if self.verify_passed:
-                text, scolor, icon = "VERIFIED - finishing", GREEN, "✓"
+                text, scolor, icon = "PATCH STATUS: VERIFIED - finishing", GREEN, "✓"
             elif self.verify_passed is False and not self.verifying:
-                text, scolor, icon = f"ROUND {self.verify_round} REJECTED - the agent is recovering from the failure", RED, "✗"
+                text, scolor, icon = f"ROUND {self.verify_round} REJECTED - the agent is recovering", RED, "⊗"
             elif self.verifying:
                 text, scolor, icon = f"VERIFYING - round {self.verify_round} in progress", BLUE, SPINNER[self._spin]
             else:
-                text, scolor, icon = "Awaiting the harness verdict", GREY, "…"
+                text, scolor, icon = "PATCH STATUS: AWAITING VERIFICATION", GREY, "…"
         elif final:
             text, scolor, icon = "PATCH STATUS: VERIFIED", GREEN, "✓"
         else:
-            text, scolor, icon = "PATCH STATUS: UNVERIFIED  (kept for inspection, not a success)", RED, "✗"
+            text, scolor, icon = "PATCH STATUS: UNVERIFIED", RED, "⊗"
         self._upd("#statusbar", Panel(Text(f"{icon}  {text}", style=f"bold {scolor}"), border_style=scolor, style=f"on {PANEL}"))
+
+    def _compact(self) -> bool:
+        return (self.size.height or 60) < 54
 
     def _risk(self) -> tuple[str, str, str]:
         if (self.result is not None and self.result.verified) or (self.result is None and self.verify_passed):
-            return "LOW", GREEN, "Objective evidence verified by the harness; no regressions."
+            return "LOW", GREEN, "Objective evidence verified; no regressions."
         fails = {c.name for c in self.checks if c.status == "fail"}
         if fails & {"tests", "syntax", "verifier"}:
-            return "HIGH", RED, "Regression or broken code detected. Not safe to accept."
+            return "HIGH", RED, "Regression or broken code. Not safe to accept yet."
         if self.checks:
-            return "MEDIUM", AMBER, f"No objective proof yet ({', '.join(sorted(fails)) or 'evidence'}). Not safe to accept."
+            return "MEDIUM", AMBER, "No objective proof yet. Not safe to accept yet."
         if self.diff.strip():
-            return "MEDIUM", AMBER, "Patch not verified yet. Not safe to accept."
+            return "MEDIUM", AMBER, "Patch not verified yet. Not safe to accept yet."
         return "–", GREY, "Nothing to assess yet."
 
     def _render_claims(self) -> None:
+        def box_for(title, lines, tag, ts, color, icon):
+            foot = Table.grid(expand=True)
+            foot.add_column(ratio=1)
+            foot.add_column(justify="right")
+            foot.add_row(Text(f" {tag} ", style=f"bold {color} on #12305a"), Text(ts, style=WHITE))
+            items = [Text(f"• {x}", style=WHITE, no_wrap=True, overflow="ellipsis") for x in lines[:3]] or [Text("waiting...", style=GREY)]
+            return Panel(Group(Text(f"{icon} {title}", style=f"bold {color}"), *items, foot),
+                         border_style=color, padding=(0, 1), style=f"on {PANEL}")  # fmt: skip
+
         if self.claim:
             text, ts = self.claim
-            sentences = [x.strip("-• ") for x in re.split(r"(?<=[.!?])\s+|\n", text) if x.strip()][:3]
-            claim = Group(*[Text(f"• {x[:80]}", style=WHITE) for x in sentences], Text(f"CLAIM · {ts}", style=GREY, justify="right"))
+            claims = [x.strip("-• ") for x in re.split(r"(?<=[.!?])\s+|\n", text) if x.strip()][:3]
         else:
-            claim = Text("The model's claim appears here when it submits.", style=GREY)
+            claims, ts = [], "--:--:--"
         if self.evidence_lines:
-            lines, ts = self.evidence_lines
-            color = GREEN if self.verify_passed else RED
-            ev = Group(*[Text(f"• {x[:80]}", style=color) for x in lines[:4]], Text(f"EVIDENCE · {ts}", style=GREY, justify="right"))
+            evidence, ets = self.evidence_lines
         else:
-            ev = Text("The harness's independent findings appear here.", style=GREY)
-        self._upd("#claim", section("◉ AGENT CLAIM", claim, color=CYAN))
-        self._upd("#evidence", section("⛨ VERIFIER EVIDENCE", ev, color=GREEN if self.verify_passed else AMBER))
+            evidence, ets = [], "--:--:--"
+        ecolor = GREEN if self.verify_passed else (RED if self.verify_passed is False else GREY)
+        self._upd("#claim", box_for("AGENT CLAIM", claims, "CLAIM", ts, CYAN, "◉"))
+        self._upd("#evidence", box_for("VERIFIER EVIDENCE", evidence[:4], "EVIDENCE", ets, ecolor if evidence else GREEN, "⛨"))
 
     def _render_footer(self) -> None:
         t = self.stats.get("tokens") or {}
@@ -732,16 +773,23 @@ class VeriApp(App):
         keys = Text()
         for k, rest in (("r", "un"), ("i", "ssue"), ("a", "gent"), ("p", "atch"), ("v", "erify"), ("d", "iff"), ("l", "og"),
                         ("h", "elp"), ("q", "uit")):  # fmt: skip
-            keys.append(f"[{k}]", style=f"bold {AMBER}")
-            keys.append(f"{rest}   ", style=WHITE)
-        status = escape(str(self.stats["status"]))[:60]
-        if self.stats.get("busy"):
-            status = f"[{CYAN}]{SPINNER[self._spin]}[/] {status}"
+            keys.append(f"[{k}]", style=f"bold {CYAN}")
+            keys.append(f"{rest}     ", style=WHITE)
         cache = f" ({100 * cached // t['prompt']}% cached)" if t.get("prompt") and cached else ""
         grid = Table.grid(expand=True)
         grid.add_column(ratio=1)
         grid.add_column(justify="right")
-        grid.add_row(keys, Text.from_markup(
-            f"{status}  [{GREY}]│[/]  Tokens: {total:,}{cache}  [{GREY}]│[/]  Time: {fmt_duration(time.time() - self._t0)}"
-            f"  [{GREY}]│[/]  Cost: ${self.stats['cost']:.4f}"))  # fmt: skip
+        grid.add_row(keys, Text(f"Tokens: {total:,}{cache}   │   Time: {fmt_duration(time.time() - self._t0)}   │   "
+                                f"Cost: ${self.stats['cost']:.4f}", style=WHITE))  # fmt: skip
         self._upd("#footerbar", grid)
+
+
+def split_code(body: str) -> tuple[str, str]:
+    """Split an issue body into prose and the first code/log block (``` fenced or indented error lines)."""
+    m = re.search(r"```[\w-]*\n(.*?)```", body, re.S)
+    if m:
+        return (body[: m.start()] + body[m.end() :]).strip(), m.group(1).strip()
+    logs = [ln for ln in body.splitlines() if re.match(r"\s*(\[ERROR\]|Traceback|  File |E\s+|ERROR|FAILED|at \w)", ln)]
+    if logs:
+        return "\n".join(ln for ln in body.splitlines() if ln not in logs).strip(), "\n".join(logs)
+    return body, ""
