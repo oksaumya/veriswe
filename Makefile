@@ -7,10 +7,11 @@
 #   make run ISSUE="<text>" REPO=/path/to/repo HEADLESS=1
 #   make test
 #
-# The API key is only ever read from the AI_API_KEY environment variable.
+# The API key is only ever read from the AI_API_KEY environment variable
+# (`export AI_API_KEY=...`, or `make run AI_API_KEY=...`; a local git-ignored .env also works).
 
 SHELL  := /bin/bash
-PYTHON ?= python3
+PYTHON_OVERRIDE ?= $(PYTHON)
 VENV   := .venv
 BIN    := $(VENV)/bin
 
@@ -27,24 +28,14 @@ help:
 
 setup:
 	@echo "==> Setting up VeriSWE"
-	@$(PYTHON) -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "Python >= 3.10 is required (set PYTHON=/path/to/python3.x)")'
-	@command -v git >/dev/null || { echo "git is required"; exit 1; }
-	@if command -v uv >/dev/null 2>&1; then \
-		uv venv -q --allow-existing --python $(PYTHON) $(VENV) && \
-		uv pip install -q --python $(BIN)/python -e . pytest ; \
-	else \
-		$(PYTHON) -m venv $(VENV) && \
-		$(BIN)/python -m pip install -q --disable-pip-version-check --upgrade pip && \
-		$(BIN)/python -m pip install -q --disable-pip-version-check -e . pytest ; \
-	fi
-	@$(BIN)/python -c "import veriswe.cli, litellm; print('==> setup OK')"
-	@[ -n "$$AI_API_KEY" ] || echo "NOTE: AI_API_KEY is not set yet. Run: export AI_API_KEY=\"<key>\""
+	@PYTHON="$(PYTHON_OVERRIDE)" VENV="$(VENV)" bash scripts/setup.sh
+	@[ -n "$$AI_API_KEY" ] || [ -f .env ] || echo "NOTE: AI_API_KEY is not set yet. Run: export AI_API_KEY=\"<key>\""
 
 $(BIN)/veriswe:
 	@$(MAKE) --no-print-directory setup
 
 run: $(BIN)/veriswe
-	@[ -n "$$AI_API_KEY" ] || { echo "ERROR: AI_API_KEY is not set. Run: export AI_API_KEY=\"<key>\""; exit 2; }
+	@[ -n "$$AI_API_KEY" ] || grep -qE '^AI_API_KEY=.+' .env 2>/dev/null || { echo "ERROR: AI_API_KEY is not set. Run: export AI_API_KEY=\"<key>\""; exit 2; }
 	@$(BIN)/veriswe \
 		$(if $(ISSUE),--issue "$(ISSUE)") \
 		$(if $(REPO),--repo "$(REPO)") \

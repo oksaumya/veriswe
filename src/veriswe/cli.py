@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
@@ -93,6 +92,8 @@ def main(
     step_limit: int = typer.Option(None, "--step-limit", envvar="STEP_LIMIT", help="Max model calls."),
 ) -> None:
     """VeriSWE - autonomous, verification-first coding agent."""
+    if not os.getenv("AI_API_KEY", "").strip():
+        os.environ.pop("AI_API_KEY", None)  # an empty value must not block the local .env
     load_dotenv(repo_root / ".env", override=False)  # optional local convenience; never committed
     overrides = {"step_limit": step_limit} if step_limit else None
 
@@ -103,6 +104,7 @@ def main(
         VeriApp(issue=issue, repo=repo, model=model, agent_overrides=overrides).run()
         return
 
+    from veriswe.intake import issue_names_repo
     from veriswe.model_config import ModelConfigError
     from veriswe.runner import run_task
 
@@ -111,9 +113,16 @@ def main(
         if sys.stdin.isatty():
             issue = _prompt_multiline("Paste the GitHub issue URL or the issue text:")
         else:
-            issue = "-"
-    if not repo and sys.stdin.isatty() and "github.com" not in (issue or ""):
-        repo = console.input("[bold cyan]Repository path or git URL[/] [dim](default: current dir)[/]: ").strip() or os.getcwd()
+            issue = sys.stdin.read().strip()
+            if not issue:
+                console.print("[bold red]No issue given.[/] Pass ISSUE=<github-issue-url | text | @file>, or pipe it on stdin.")
+                raise typer.Exit(2)
+    if not repo and not issue_names_repo(issue or ""):
+        if not sys.stdin.isatty():
+            console.print("[bold red]No repository given.[/] Pass REPO=<path-or-git-url>, or use a GitHub issue URL as ISSUE.")
+            raise typer.Exit(2)
+        while not repo:
+            repo = console.input("[bold cyan]Repository to fix[/] [dim](local path or git URL)[/]: ").strip()
     try:
         result = run_task(issue, repo, model_override=model, on_event=HeadlessPrinter(verbose=not quiet), agent_overrides=overrides)
     except ModelConfigError as e:

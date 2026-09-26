@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 
 from rich.markup import escape
@@ -16,6 +15,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static, TextArea
 
 from veriswe import __version__
+from veriswe.intake import issue_names_repo
 
 STATUS_STYLE = {"pass": "green", "fail": "red", "warn": "yellow", "skip": "grey50"}
 
@@ -35,7 +35,7 @@ class IntakeScreen(Screen):
             yield Label("Issue: GitHub issue URL, or paste the full issue text")
             yield TextArea(self._issue, id="issue")
             yield Label("Repository: local path or git URL (optional when the issue URL is on GitHub)")
-            yield Input(value=self._repo, placeholder=os.getcwd(), id="repo")
+            yield Input(value=self._repo, placeholder="/path/to/repo  or  https://github.com/owner/repo", id="repo")
             with Horizontal(id="buttons"):
                 yield Button("Solve issue  (Ctrl+S)", variant="success", id="start")
             yield Label("", id="error")
@@ -51,8 +51,11 @@ class IntakeScreen(Screen):
         if not issue:
             self.query_one("#error", Label).update("[red]Please provide an issue URL or text.[/red]")
             return
-        if not repo and "github.com" not in issue:
-            repo = os.getcwd()
+        if not repo and not issue_names_repo(issue):
+            self.query_one("#error", Label).update(
+                "[red]Please enter the repository (local path or git URL), or give a GitHub issue URL.[/red]"
+            )
+            return
         self.app.start_run(issue, repo or None)
 
 

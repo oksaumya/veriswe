@@ -217,3 +217,20 @@ def test_select_tests_via_indirect_package_import(tmp_path):
     (tmp_path / "tests" / "test_things.py").write_text("from . import lib\n")
     ws = Workspace(repo=tmp_path, base_commit="HEAD")
     assert Verifier(ws).select_python_tests(["src/pkg/_core.py"]) == ["tests/test_things.py"]
+
+
+def test_issue_shorthand_and_repo_detection():
+    from veriswe.intake import SHORTHAND_RE, issue_names_repo
+
+    assert SHORTHAND_RE.match("psf/requests#6234")
+    assert issue_names_repo("https://github.com/psf/requests/issues/6234")
+    assert issue_names_repo("psf/requests#6234")
+    assert not issue_names_repo("median is wrong for even-length lists")
+
+
+def test_refuses_to_work_on_the_harness_itself():
+    from veriswe import repo_root
+    from veriswe.intake import Issue, resolve_repo
+
+    with pytest.raises(ValueError, match="harness itself"):
+        resolve_repo(str(repo_root), Issue(title="", body="x"), repo_root / "workspace")

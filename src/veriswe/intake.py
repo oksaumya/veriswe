@@ -11,6 +11,8 @@ from pathlib import Path
 
 import requests
 
+from veriswe import repo_root as HARNESS_ROOT
+
 ISSUE_URL_RE = re.compile(r"https?://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/(?:issues|pull)/(?P<num>\d+)")
 REPO_URL_RE = re.compile(r"^(https?://|git@)[^\s]+$")
 
@@ -114,9 +116,14 @@ def _fetch_via_api(owner: str, repo: str, num: str, max_comments: int) -> Issue:
     return Issue(title=data.get("title", ""), body=body)
 
 
+SHORTHAND_RE = re.compile(r"^(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#(?P<num>\d+)$")
+
+
 def read_issue(spec: str) -> Issue:
-    """spec can be: a GitHub issue URL, '@path/to/file', '-' (stdin), a path to an existing file, or raw text."""
+    """spec can be: a GitHub issue URL, 'owner/repo#123', '@path/to/file', '-' (stdin), a file path, or raw text."""
     spec = spec.strip()
+    if m := SHORTHAND_RE.match(spec):
+        spec = f"https://github.com/{m['owner']}/{m['repo']}/issues/{m['num']}"
     if ISSUE_URL_RE.fullmatch(spec) or (ISSUE_URL_RE.match(spec) and "\n" not in spec):
         return fetch_github_issue(spec)
     if spec == "-":
@@ -142,6 +149,11 @@ def resolve_repo(repo_spec: str | None, issue: Issue, workspace_root: Path) -> P
         p = Path(spec).expanduser().resolve()
         if not p.is_dir():
             raise FileNotFoundError(f"Repository path does not exist: {p}")
+        if p == HARNESS_ROOT.resolve():
+            raise ValueError(
+                f"{p} is the VeriSWE harness itself, not a target repository. "
+                "Pass REPO=<path-or-git-url> of the project to fix (or give a GitHub issue URL)."
+            )
         return p
     url = spec or issue.repo_url
     if not url:
@@ -153,3 +165,9 @@ def resolve_repo(repo_spec: str | None, issue: Issue, workspace_root: Path) -> P
     workspace_root.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "--quiet", url, str(dest)], check=True)
     return dest
+
+
+def issue_names_repo(issue_spec: str) -> bool:
+    """True if the issue spec itself identifies the repository (GitHub issue URL or owner/repo#N)."""
+    spec = issue_spec.strip()
+    return bool(ISSUE_URL_RE.search(spec) or SHORTHAND_RE.match(spec))
