@@ -192,3 +192,6 @@ pyrightconfig.json
 runs/
 workspace/
 .veriswe/
+
+# Upstream test fixtures (must be tracked despite the *.traj.json rule above)
+!tests/test_data/*.traj.json
