@@ -1,11 +1,11 @@
 """Unit tests for VeriSWE building blocks (offline, no API key)."""
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from veriswe import tools_dir
 from veriswe.context import mask_observations
 from veriswe.guards import LoopDetector, check_command
 from veriswe.intake import read_issue
@@ -145,7 +145,9 @@ def test_workspace_diff_includes_new_files_and_excludes_scratch(calc_repo: Path)
 
 
 def _tool(name, *args, cwd, stdin=""):
-    return subprocess.run([str(tools_dir / name), *args], cwd=cwd, input=stdin, capture_output=True, text=True)
+    from veriswe.environment import tool_shims_dir
+
+    return subprocess.run([str(tool_shims_dir() / name), *args], cwd=cwd, input=stdin, capture_output=True, text=True)
 
 
 def test_str_replace_unique_and_lint_revert(tmp_path):
@@ -253,3 +255,21 @@ def test_model_routing(tmp_path, key, model, expected):
 
     env = {"AI_API_KEY": key, **({"AI_MODEL": model} if model else {})}
     assert resolve_model(env=env, yaml_path=config_dir / "model.yaml").model_name == expected
+
+
+def test_tools_ignore_a_broken_system_python(tmp_path, monkeypatch):
+    """Evaluation machines may have an old or missing `python3`; the agent's tools must still run."""
+    from veriswe.environment import VeriEnvironment
+
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").write_text("#!/bin/sh\necho 'this is a broken python3' >&2\nexit 1\n")
+    (fake_bin / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / "m.py").write_text("x = 1\n")
+    env = VeriEnvironment(cwd=str(repo))
+    out = env.execute({"command": "view m.py && str_replace m.py --old 'x = 1' --new 'x = 2'"})
+    assert out["returncode"] == 0, out["output"]
+    assert (repo / "m.py").read_text() == "x = 2\n"

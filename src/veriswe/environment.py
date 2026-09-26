@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
@@ -28,6 +32,27 @@ def scrubbed_environ() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in SECRET_ENV_VARS}
 
 
+_SHIMS_DIR: Path | None = None
+
+
+def tool_shims_dir() -> Path:
+    """Directory of launchers that run our helper tools with *this* interpreter.
+
+    The tool scripts' `#!/usr/bin/env python3` would pick whatever python3 is on PATH, which may be too old
+    or missing on the evaluation machine; the launchers pin them to VeriSWE's own (>= 3.10) Python.
+    """
+    global _SHIMS_DIR
+    if _SHIMS_DIR is None or not _SHIMS_DIR.is_dir():
+        d = Path(tempfile.mkdtemp(prefix="veriswe-tools-"))
+        for tool in sorted(tools_dir.iterdir()):
+            if tool.is_file() and not tool.name.startswith((".", "_")):
+                shim = d / tool.name
+                shim.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(tool))} "$@"\n')
+                shim.chmod(0o755)
+        _SHIMS_DIR = d
+    return _SHIMS_DIR
+
+
 class VeriEnvironmentConfig(LocalEnvironmentConfig):
     timeout: int = 180
 
@@ -36,7 +61,7 @@ class VeriEnvironment(LocalEnvironment):
     def __init__(self, **kwargs):
         super().__init__(config_class=VeriEnvironmentConfig, **kwargs)
         path = os.environ.get("PATH", "")
-        self.config.env = {**self.config.env, "PATH": f"{tools_dir}{os.pathsep}{path}"}
+        self.config.env = {**self.config.env, "PATH": f"{tool_shims_dir()}{os.pathsep}{path}"}
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict[str, Any]:
         command = action.get("command", "")
