@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""undo_edit FILE: revert the most recent str_replace edit (or creation) of FILE."""
+
+import os
+import sys
+from pathlib import Path
+
+SCRATCH = Path(os.environ.get("VERISWE_SCRATCH", ".veriswe"))
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 1
+    path = Path(argv[1])
+    key = str(path.resolve()).replace(os.sep, "__")
+    d = SCRATCH / "backups"
+    backups = sorted(d.glob(f"{key}.*.veriswe.bak")) if d.is_dir() else []
+    if not backups:
+        print(f"ERROR: no edit history for {path}")
+        return 1
+    last = backups[-1]
+    created_marker = Path(str(last) + ".new")
+    if created_marker.exists():
+        path.unlink(missing_ok=True)
+        created_marker.unlink()
+        print(f"Removed {path} (undid creation).")
+    else:
+        path.write_text(last.read_text())
+        print(f"Restored {path} to its state before the last edit.")
+    last.unlink()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

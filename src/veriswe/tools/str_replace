@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""str_replace: precise, lint-gated file editing.
+
+Usage (preferred, via heredoc; one or more SEARCH/REPLACE blocks):
+
+    str_replace path/to/file.py <<'EOF'
+    <<<<<<< SEARCH
+    exact old lines
+    =======
+    new lines
+    >>>>>>> REPLACE
+    EOF
+
+Alternative:  str_replace FILE --old 'old text' --new 'new text'
+Create a file: str_replace FILE --create <<'EOF' ... EOF
+
+Rules: the SEARCH text must match exactly one location in the file. After editing, the file is
+syntax-checked (Python/JSON/JS/YAML/TOML when possible). If the check fails the edit is reverted.
+"""
+
+import difflib
+import json
+import re
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRATCH = Path(os.environ.get("VERISWE_SCRATCH", ".veriswe"))
+BLOCK_START, BLOCK_MID, BLOCK_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
+CONTEXT = 4
+
+
+def die(msg: str, code: int = 1):
+    print(msg)
+    sys.exit(code)
+
+
+START_RE = re.compile(r"^\s*<{5,9}\s*SEARCH\s*$")
+MID_RE = re.compile(r"^\s*={5,9}\s*$")
+END_RE = re.compile(r"^\s*>{5,9}\s*REPLACE\s*$")
+
+
+def parse_blocks(text: str) -> list[tuple[str, str]]:
+    """Parse SEARCH/REPLACE blocks. Marker lengths are lenient (5-9 chars) because models often miscount."""
+    blocks, lines, i = [], text.splitlines(keepends=True), 0
+    while i < len(lines):
+        if START_RE.match(lines[i].rstrip("\r\n")):
+            i += 1
+            old = []
+            while i < len(lines) and not MID_RE.match(lines[i].rstrip("\r\n")):
+                old.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                die("ERROR: malformed block: missing '=======' separator.")
+            i += 1
+            new = []
+            while i < len(lines) and not END_RE.match(lines[i].rstrip("\r\n")):
+                new.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                die("ERROR: malformed block: missing '>>>>>>> REPLACE' terminator.")
+            blocks.append(("".join(old), "".join(new)))
+        i += 1
+    return blocks
+
+
+def find_all(hay: str, needle: str) -> list[int]:
+    out, start = [], 0
+    while needle:
+        idx = hay.find(needle, start)
+        if idx < 0:
+            break
+        out.append(idx)
+        start = idx + 1
+    return out
+
+
+def line_of(text: str, idx: int) -> int:
+    return text.count("\n", 0, idx) + 1
+
+
+def _lead(s: str) -> int:
+    return len(s) - len(s.lstrip())
+
+
+def _uniform_delta(c_block: list[str], o_block: list[str]) -> int | None:
+    """Indentation shift that maps o_block onto c_block (ignoring trailing whitespace), or None."""
+    delta = None
+    for c, o in zip(c_block, o_block):
+        c, o = c.rstrip(), o.rstrip()
+        if not c and not o:
+            continue
+        if c.strip() != o.strip():
+            return None
+        d = _lead(c) - _lead(o)
+        if delta is None:
+            delta = d
+        elif d != delta:
+            return None
+    return delta if delta is not None else 0
+
+
+def fuzzy_locate(content: str, old: str) -> tuple[int, int, int] | None:
+    """Match ignoring trailing whitespace and a *uniform* indentation shift. Returns (start, end, delta)."""
+    c_lines = content.splitlines(keepends=True)
+    o_lines = old.splitlines()
+    if not o_lines:
+        return None
+    hits = []
+    for i in range(len(c_lines) - len(o_lines) + 1):
+        d = _uniform_delta(c_lines[i : i + len(o_lines)], o_lines)
+        if d is not None:
+            hits.append((i, d))
+    if len(hits) != 1:
+        return None
+    i, delta = hits[0]
+    start = sum(len(l) for l in c_lines[:i])
+    end = start + sum(len(l) for l in c_lines[i : i + len(o_lines)])
+    return start, end, delta
+
+
+def reindent(new: str, delta: int) -> str:
+    """The model got indentation uniformly wrong: shift `new` by the same delta."""
+    if delta == 0:
+        return new
+    out = []
+    for l in new.splitlines(keepends=True):
+        if not l.strip():
+            out.append(l)
+        elif delta > 0:
+            out.append(" " * delta + l)
+        else:
+            cut = min(-delta, len(l) - len(l.lstrip()))
+            out.append(l[cut:])
+    return "".join(out)
+
+
+def closest_hint(content: str, old: str) -> str:
+    c_lines = content.splitlines()
+    first = next((l for l in old.splitlines() if l.strip()), "")
+    if not first:
+        return ""
+    matches = difflib.get_close_matches(first.strip(), [l.strip() for l in c_lines], n=3, cutoff=0.6)
+    if not matches:
+        return ""
+    lines = []
+    for m in matches:
+        for i, l in enumerate(c_lines):
+            if l.strip() == m:
+                lines.append(f"  line {i + 1}: {l}")
+                break
+    return "Closest lines in the file:\n" + "\n".join(lines) + "\nUse `view FILE START END` to copy the exact text."
+
+
+def syntax_check(path: Path) -> str:
+    """Return an error message, or '' if OK / not checkable."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".py":
+            src = path.read_text()
+            compile(src, str(path), "exec")
+        elif suffix == ".json":
+            json.loads(path.read_text())
+        elif suffix in {".js", ".mjs", ".cjs"} and shutil.which("node"):
+            r = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                return r.stderr.strip()[-2000:]
+        elif suffix in {".yaml", ".yml"}:
+            try:
+                import yaml  # noqa: PLC0415
+            except ImportError:
+                return ""
+            yaml.safe_load(path.read_text())
+        elif suffix == ".toml":
+            try:
+                import tomllib  # noqa: PLC0415
+            except ImportError:
+                return ""
+            tomllib.loads(path.read_text())
+    except SyntaxError as e:
+        return f"SyntaxError: {e.msg} (line {e.lineno}, col {e.offset})\n    {(e.text or '').rstrip()}"
+    except Exception as e:  # json / yaml / toml errors
+        return f"{type(e).__name__}: {e}"
+    return ""
+
+
+def is_tracked(path: Path) -> bool:
+    try:
+        r = subprocess.run(["git", "ls-files", "--error-unmatch", str(path)], cwd=path.parent or ".", capture_output=True)
+        return r.returncode == 0
+    except Exception:
+        return True  # be conservative
+
+
+def backup(path: Path, content: str | None) -> None:
+    d = SCRATCH / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    key = str(path.resolve()).replace(os.sep, "__")
+    stamp = f"{time.time():.6f}"
+    (d / f"{key}.{stamp}.veriswe.bak").write_text("" if content is None else content)
+    if content is None:
+        (d / f"{key}.{stamp}.veriswe.bak.new").write_text("")  # marks "file did not exist"
+
+
+def show_snippet(path: Path, content: str, start_line: int, n_new_lines: int) -> None:
+    lines = content.splitlines()
+    a = max(1, start_line - CONTEXT)
+    b = min(len(lines), start_line + max(n_new_lines, 1) - 1 + CONTEXT)
+    print(f"Edited {path} (lines {start_line}-{start_line + max(n_new_lines, 1) - 1}). Snippet:")
+    for i in range(a, b + 1):
+        print(f"{i:6d}\t{lines[i - 1]}")
+
+
+def main(argv: list[str]) -> None:
+    if len(argv) < 2 or argv[1] in {"-h", "--help"}:
+        die(__doc__, 0)
+    path = Path(argv[1])
+    args = argv[2:]
+
+    if "--create" in args:
+        previous = None
+        if path.exists():
+            if is_tracked(path):
+                die(f"ERROR: {path} is an existing project file. Use SEARCH/REPLACE blocks to edit it.")
+            previous = path.read_text(errors="replace")  # a file we created earlier: allow overwrite
+        text = sys.stdin.read()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        if err := syntax_check(path):
+            path.write_text(previous) if previous is not None else path.unlink()
+            die(f"ERROR: the new content has a syntax error; file NOT written.\n{err}")
+        backup(path, previous)
+        print(f"{'Overwrote' if previous is not None else 'Created'} {path} ({len(text.splitlines())} lines).")
+        return
+
+    if not path.is_file():
+        die(f"ERROR: {path} does not exist (cwd: {os.getcwd()}). To create a new file use: str_replace {path} --create <<'EOF'")
+
+    if "--old" in args:
+        try:
+            old = args[args.index("--old") + 1]
+            new = args[args.index("--new") + 1] if "--new" in args else ""
+        except IndexError:
+            die("ERROR: --old/--new need a value.")
+        blocks = [(old, new)]
+    else:
+        if sys.stdin.isatty():
+            die("ERROR: provide SEARCH/REPLACE blocks on stdin (use a heredoc), or --old/--new.")
+        blocks = parse_blocks(sys.stdin.read())
+        if not blocks:
+            die("ERROR: no SEARCH/REPLACE blocks found on stdin. Expected:\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE")
+
+    original = path.read_text()
+    content = original
+    edited_at = []
+    for n, (old, new) in enumerate(blocks, 1):
+        if not old.strip():
+            die(f"ERROR (block {n}): SEARCH text is empty. Include some existing lines to anchor the edit.")
+        hits = find_all(content, old)
+        if len(hits) > 1:
+            where = ", ".join(str(line_of(content, h)) for h in hits[:10])
+            die(f"ERROR (block {n}): SEARCH text matches {len(hits)} locations (lines {where}). Include more surrounding lines to make it unique. No changes were made.")
+        if len(hits) == 1:
+            start, end = hits[0], hits[0] + len(old)
+            replacement = new
+        else:
+            loc = fuzzy_locate(content, old)
+            if loc is None:
+                die(f"ERROR (block {n}): SEARCH text not found in {path}. No changes were made.\n{closest_hint(content, old)}")
+            start, end, delta = loc
+            replacement = reindent(new, delta)
+            if content[start:end].endswith("\n") and replacement and not replacement.endswith("\n"):
+                replacement += "\n"
+        content = content[:start] + replacement + content[end:]
+        edited_at.append((line_of(content, start), len(replacement.splitlines())))
+
+    path.write_text(content)
+    if err := syntax_check(path):
+        path.write_text(original)
+        die(f"ERROR: your edit introduced a syntax error, so it was REVERTED (file unchanged).\n{err}\nFix the edit and try again.")
+    backup(path, original)
+    for line, n_lines in edited_at:
+        show_snippet(path, content, line, n_lines)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

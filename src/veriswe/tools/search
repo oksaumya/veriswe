@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""search: fast code search with capped output (ripgrep if available, else grep).
+
+Usage:
+    search PATTERN [PATH] [--glob '*.py'] [-i] [--files]
+      --files   list matching file names only (with match counts)
+PATTERN is a regular expression.
+"""
+
+import shutil
+import subprocess
+import sys
+
+MAX_LINES = 80
+MAX_LINE_LEN = 240
+EXCLUDES = [".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "build", "dist", ".veriswe", ".mypy_cache"]
+
+
+def main(argv):
+    args = argv[1:]
+    if not args or args[0] in {"-h", "--help"}:
+        print(__doc__)
+        return 0
+    files_only = "--files" in args
+    ignore_case = "-i" in args
+    glob = None
+    if "--glob" in args:
+        i = args.index("--glob")
+        glob = args[i + 1] if i + 1 < len(args) else None
+        del args[i : i + 2]
+    args = [a for a in args if a not in {"--files", "-i"}]
+    pattern = args[0]
+    path = args[1] if len(args) > 1 else "."
+
+    if shutil.which("rg"):
+        cmd = ["rg", "--no-heading", "--line-number", "--color=never", "-M", str(MAX_LINE_LEN)]
+        if files_only:
+            cmd = ["rg", "--count", "--color=never"]
+        if ignore_case:
+            cmd.append("-i")
+        if glob:
+            cmd += ["--glob", glob]
+        for e in EXCLUDES:
+            cmd += ["--glob", f"!{e}"]
+        cmd += ["-e", pattern, path]
+    else:
+        cmd = ["grep", "-rEn" if not files_only else "-rEc", "--color=never"]
+        if ignore_case:
+            cmd.append("-i")
+        if glob:
+            cmd.append(f"--include={glob}")
+        for e in EXCLUDES:
+            cmd.append(f"--exclude-dir={e}")
+        cmd += ["-e", pattern, path]
+    res = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    lines = [l for l in res.stdout.splitlines() if not (files_only and l.endswith(":0"))]
+    if not lines:
+        print(f"No matches for /{pattern}/ in {path}" + (f" ({res.stderr.strip()[:300]})" if res.returncode > 1 else ""))
+        return 1
+    for l in lines[:MAX_LINES]:
+        print(l[:MAX_LINE_LEN])
+    if len(lines) > MAX_LINES:
+        print(f"[... {len(lines) - MAX_LINES} more matches not shown. Narrow the pattern or PATH, or use --files.]")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

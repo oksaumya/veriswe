@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""view: show a file with line numbers in windows (default 100 lines), or a directory tree.
+
+Usage:
+    view FILE              # first 100 lines
+    view FILE START        # 100 lines starting at START
+    view FILE START END    # lines START..END (inclusive)
+    view DIR               # directory tree, depth 2
+"""
+
+import os
+import sys
+from pathlib import Path
+
+WINDOW = 100
+MAX_WINDOW = 400
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", "build", "dist", ".veriswe", ".eggs"}
+
+
+def tree(root: Path, depth: int = 2) -> None:
+    print(f"{root}/")
+    count = 0
+
+    def walk(d: Path, level: int, prefix: str):
+        nonlocal count
+        try:
+            entries = sorted(d.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+        except PermissionError:
+            return
+        for e in entries:
+            if e.name in SKIP_DIRS or e.name.endswith(".egg-info"):
+                continue
+            count += 1
+            if count > 300:
+                return
+            print(f"{prefix}{e.name}{'/' if e.is_dir() else ''}")
+            if e.is_dir() and level < depth:
+                walk(e, level + 1, prefix + "  ")
+
+    walk(root, 1, "  ")
+    if count > 300:
+        print("  ... (truncated; view a subdirectory)")
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in {"-h", "--help"}:
+        print(__doc__)
+        return 0
+    p = Path(argv[1])
+    if p.is_dir():
+        tree(p)
+        return 0
+    if not p.is_file():
+        print(f"ERROR: {p} does not exist (cwd: {os.getcwd()})")
+        return 1
+    lines = p.read_text(errors="replace").splitlines()
+    n = len(lines)
+    try:
+        start = int(argv[2]) if len(argv) > 2 else 1
+        end = int(argv[3]) if len(argv) > 3 else start + WINDOW - 1
+    except ValueError:
+        print("ERROR: START and END must be integers")
+        return 1
+    start = max(1, start)
+    end = min(n, end, start + MAX_WINDOW - 1)
+    print(f"[{p}: {n} lines total, showing {start}-{end}]")
+    for i in range(start, end + 1):
+        print(f"{i:6d}\t{lines[i - 1]}")
+    if end < n:
+        print(f"[... {n - end} more lines. Use `view {p} {end + 1}` to continue.]")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

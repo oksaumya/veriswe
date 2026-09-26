@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# VeriSWE model configuration
+#
+# The API credential is NEVER stored here. It is read at runtime from the
+# environment variable AI_API_KEY (see .env.example).
+#
+# Every value below can be overridden without editing this file:
+#   AI_MODEL      -> model_name
+#   AI_PROVIDER   -> provider   (auto | openai | anthropic | gemini | openrouter | groq | xai | mistral | deepseek | together)
+#   AI_BASE_URL   -> base_url   (any OpenAI-compatible endpoint, e.g. vLLM / Ollama / a proxy)
+#   AI_TEXT_MODE  -> action_mode=text when "1", toolcall when "0"
+# ---------------------------------------------------------------------------
+
+# The model prescribed by the Organising Committee goes here.
+# Leave empty to use the provider default listed under `provider_defaults` (if that default has been retired,
+# the best available chat model for the key is auto-selected), or, when base_url is set, the first model the
+# endpoint's /models route lists. An explicitly configured model is never substituted.
+model_name: ""
+
+# auto = infer from the AI_API_KEY prefix (sk-ant- -> anthropic, AIza -> gemini, sk-or- -> openrouter, ...)
+provider: auto
+
+# Optional OpenAI-compatible endpoint.
+base_url: ""
+
+# auto = probe the model once at startup: use native tool calling if it works,
+# otherwise fall back to plain-text actions (```mswea_bash_command blocks).
+action_mode: auto   # auto | toolcall | text
+
+# Reproducibility: greedy decoding. (Parameters a model does not support are dropped automatically.)
+model_kwargs:
+  temperature: 0.0
+  drop_params: true
+
+provider_defaults:
+  anthropic: claude-sonnet-5
+  openai: gpt-5
+  gemini: gemini-2.5-pro
+  openrouter: anthropic/claude-sonnet-5
+  groq: openai/gpt-oss-120b
+  xai: grok-4
+  mistral: devstral-medium-latest
+  deepseek: deepseek-chat
+  together: Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8
