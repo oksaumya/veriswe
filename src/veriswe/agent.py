@@ -155,7 +155,9 @@ class VeriAgent(DefaultAgent):
     def _handle_model_failure(self, e: Exception) -> None:
         """API died mid-run (after retries): still verify + submit the best work so far."""
         if self.n_calls > 1:
-            self.emit("model_error", error=f"{type(e).__name__}: {e}")
+            from veriswe.model_config import account_problem
+
+            self.emit("model_error", error=account_problem(e) or f"{type(e).__name__}: {e}")
             self._finish_on_limit(f"ModelError ({type(e).__name__})")
 
     def _account_tokens(self, message: dict) -> None:

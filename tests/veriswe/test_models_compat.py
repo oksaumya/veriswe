@@ -119,3 +119,47 @@ def test_deepseek_cache_hits_are_counted():
     agent._account_tokens({"extra": {"response": {"usage": usage}}})
     assert agent.tokens == {"prompt": 100, "completion": 5, "cached": 64}
     assert json.dumps(agent.tokens)
+
+
+def test_billing_errors_are_explained_not_misdiagnosed(monkeypatch):
+    import veriswe.model_config as mc
+    from veriswe.model_config import ModelConfigError, ResolvedModel, probe_action_mode
+
+    err = litellm.exceptions.BadRequestError(
+        message='DeepseekException - {"error":{"message":"Insufficient Balance"}}', model="deepseek/deepseek-flash", llm_provider="deepseek"
+    )
+
+    def boom(*a, **k):
+        raise err
+
+    monkeypatch.setattr("veriswe.models.adaptive_completion", boom)
+    r = ResolvedModel(model_name="deepseek/deepseek-flash", provider="deepseek", action_mode="auto", model_kwargs={"api_key": "k"})
+    with pytest.raises(ModelConfigError, match="no usable credit"):
+        probe_action_mode(r)
+    assert mc.account_problem(Exception("rate limit reached")) is None
+
+
+def test_discovery_returns_without_waiting_for_slow_hosts(monkeypatch):
+    import time
+
+    import requests
+
+    import veriswe.model_config as mc
+
+    class R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{"id": "deepseek-flash"}]}
+
+    def get(url, **kw):
+        if "deepseek" in url:
+            return R()
+        time.sleep(3)  # a slow, irrelevant host
+        raise requests.ConnectionError
+
+    monkeypatch.setattr(requests, "get", get)
+    t = time.time()
+    ep = mc._real_discover_endpoint("sk-x")
+    assert ep.provider == "deepseek" and time.time() - t < 1.5

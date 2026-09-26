@@ -121,7 +121,7 @@ class Endpoint:
     models: list[str]
 
 
-def discover_endpoint(api_key: str, candidates: list[tuple[str, str]] | None = None, timeout: float = 10) -> Endpoint | None:
+def discover_endpoint(api_key: str, candidates: list[tuple[str, str]] | None = None, timeout: float = 8) -> Endpoint | None:
     """Find which OpenAI-compatible host accepts this key (probes `GET /models` on all candidates in parallel).
 
     Returns the highest-priority candidate that answers 200 with a model list, or None.
@@ -142,9 +142,16 @@ def discover_endpoint(api_key: str, candidates: list[tuple[str, str]] | None = N
             pass
         return None
 
-    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
-        results = list(pool.map(probe, candidates))
-    return next((r for r in results if r is not None), None)
+    # Return as soon as the highest-priority host that accepts the key is known (don't wait for slow hosts).
+    pool = ThreadPoolExecutor(max_workers=len(candidates))
+    futures = [pool.submit(probe, c) for c in candidates]
+    try:
+        for fut in futures:  # in priority order
+            if (result := fut.result()) is not None:
+                return result
+        return None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def load_model_yaml(path: Path | None = None) -> dict:
@@ -318,6 +325,28 @@ def resolve_model(
     )
 
 
+ACCOUNT_ERROR_MARKERS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "payment required",
+    "billing",
+    "arrearage",  # Alibaba Cloud: account overdue
+    "account is not active",
+)
+
+
+def account_problem(e: Exception) -> str | None:
+    """A human explanation if the error is about the account (credit, quota), not the request."""
+    text = str(e).lower()
+    if getattr(e, "status_code", None) == 402 or any(m in text for m in ACCOUNT_ERROR_MARKERS):
+        m = re.search(r'"message"\s*:\s*"([^"]+)"', str(e))
+        reason = (m.group(1) if m else str(e)[-160:]).strip()
+        return f"the API account behind AI_API_KEY has no usable credit/quota (provider says: {reason}). Top up the account or use another key."
+    return None
+
+
 def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
     """Make one tiny call to check auth + native tool calling. Returns (mode, note)."""
     import litellm
@@ -351,6 +380,8 @@ def probe_action_mode(resolved: ResolvedModel) -> tuple[str, str]:
     except litellm.exceptions.AuthenticationError as e:
         raise ModelConfigError(f"Model probe failed for {resolved.display}: {e}") from e
     except Exception as e:
+        if problem := account_problem(e):
+            raise ModelConfigError(f"{resolved.display}: {problem}") from e
         # Tools probably unsupported; check the model answers at all without tools.
         try:
             adaptive_completion(resolved.model_name, [{"role": "user", "content": "Reply with: ok"}], kwargs)
