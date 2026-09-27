@@ -16,6 +16,15 @@ A result is **VERIFIED** only with evidence that fails on the original code and 
 
 > Same model. Different harness. **Evidence over claims.**
 
+![VeriSWE terminal dashboard after a verified run](docs/assets/veriswe-tui.png)
+
+*`make run` after a verified run (the `make demo-recovery` replay):*
+- *the phase pipeline*
+- *issue context and the agent timeline, including the rejected first attempt and the recovery*
+- *the independent verification gate (six checks)*
+- *test results and a risk rating*
+- *the agent's claim shown next to the verifier's evidence*
+
 VeriSWE builds on [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) (MIT), from the Princeton/Stanford SWE-agent team. mini-swe-agent is the reference harness for SWE-bench bash-only and SWE-bench Pro. We kept its small, linear, provider-agnostic agent loop and added the harness engineering that it deliberately leaves out.
 
 ---
@@ -187,7 +196,7 @@ Each addition targets a failure mode documented in recent coding-agent research.
 
 ## Tests
 
-`make test` runs **107 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **633 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
+`make test` runs **108 offline tests** in under 30 seconds, with no network or API key. `make test-all` additionally runs the whole upstream mini-swe-agent suite: **635 passed**, with 59 skipped because they need Docker or cloud sandboxes. CI runs `make setup` and `make test` on Ubuntu, on macOS, on Debian without `python3-venv`, on a machine with only Python 3.9, and on `python:3.12-slim`.
 
 The suite covers:
 

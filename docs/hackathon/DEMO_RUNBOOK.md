@@ -21,7 +21,7 @@ The flow to show is **TASK → EXPLORE → ACT → TEST → FAILURE → RECOVER 
 git clone <repo> && cd <repo>
 export AI_API_KEY="<key>"   # DeepSeek / Qwen key; the host is detected from the key itself
 make setup
-make test                  # 107 offline tests pass
+make test                  # 108 offline tests pass
 ```
 
 ## 1. Guaranteed recovery demo (offline, about 10 seconds, no API key)

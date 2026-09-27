@@ -412,3 +412,28 @@ def test_cli_task_option_reaches_the_runner(monkeypatch, tmp_path):
     res = CliRunner().invoke(app, ["--task", "Add a --json flag", "--repo", str(tmp_path), "--headless"])
     assert seen == {"issue": "Add a --json flag", "repo": str(tmp_path)}
     assert "Input error" in res.output and res.exit_code == 2
+
+
+def test_discovery_falls_back_to_completion_probe_for_qwen(monkeypatch):
+    """A Qwen/DashScope key whose host does not expose GET /models is still routed to DashScope."""
+    import requests
+
+    import veriswe.model_config as mc
+
+    monkeypatch.setattr(mc, "discover_endpoint", mc._real_discover_endpoint)
+    monkeypatch.setattr(requests, "get", lambda url, **kw: _FakeResp(404 if "dashscope-intl" in url else 401))
+
+    class Post:
+        def __init__(self, status, text):
+            self.status_code, self.text = status, text
+
+    def post(url, **kw):
+        if "dashscope-intl" in url:
+            return Post(200, '{"choices": []}')
+        return Post(401, '{"error": {"code": "invalid_api_key"}}')
+
+    monkeypatch.setattr(requests, "post", post)
+    r = mc.resolve_model(env={"AI_API_KEY": "sk-qwenkey"}, yaml_path=mc.config_dir / "model.yaml")
+    assert r.provider == "dashscope" and "dashscope-intl" in r.model_kwargs["api_base"]
+    assert r.model_name == "dashscope/qwen3.8-max"  # provider default when the host lists no models
+    assert r.model_kwargs["temperature"] == 0.7

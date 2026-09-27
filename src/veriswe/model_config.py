@@ -149,6 +149,48 @@ def discover_endpoint(api_key: str, candidates: list[tuple[str, str]] | None = N
         for fut in futures:  # in priority order
             if (result := fut.result()) is not None:
                 return result
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return _discover_by_completion(api_key, candidates, timeout)
+
+
+# If no host answers GET /models (some accounts/endpoints don't expose it), ask the prescribed-family hosts with a
+# 1-token chat completion instead: anything but an authentication error proves the key belongs to that host.
+COMPLETION_PROBES = {"deepseek": "deepseek-flash", "dashscope": "qwen-plus"}
+
+
+def _discover_by_completion(api_key: str, candidates: list[tuple[str, str]], timeout: float) -> Endpoint | None:
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    probes = [(p, url) for p, url in candidates if p in COMPLETION_PROBES]
+    if not probes:
+        return None
+
+    def probe(c):
+        provider, url = c
+        try:
+            r = requests.post(
+                url.rstrip("/") + "/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"model": COMPLETION_PROBES[provider], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                timeout=timeout,
+            )
+            text = r.text.lower()
+            if r.status_code in (401, 403) or "invalid_api_key" in text or "incorrect api key" in text or "authentication" in text:
+                return None
+            if r.status_code < 500:  # 200, or 400/402/404/429 from a host that recognised the key
+                return Endpoint(provider, url, [])
+        except Exception:
+            pass
+        return None
+
+    pool = ThreadPoolExecutor(max_workers=len(probes))
+    futures = [pool.submit(probe, c) for c in probes]
+    try:
+        for fut in futures:
+            if (result := fut.result()) is not None:
+                return result
         return None
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
