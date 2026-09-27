@@ -13,6 +13,7 @@ A result is **VERIFIED** only with evidence that fails on the original code and 
 - [docs/hackathon/REQUIREMENTS.md](docs/hackathon/REQUIREMENTS.md) maps each requirement to the implementation and to its evidence.
 - [docs/hackathon/DEMO_RUNBOOK.md](docs/hackathon/DEMO_RUNBOOK.md) is the demo script.
 - `make demo-recovery` shows failure, recovery and verification offline in about 10 seconds.
+- [docs/hackathon/VeriSWE-Pitch.pptx](docs/hackathon/VeriSWE-Pitch.pptx) is the presentation deck (12 slides, with speaker notes).
 
 > Same model. Different harness. **Evidence over claims.**
 
